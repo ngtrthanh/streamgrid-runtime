@@ -276,18 +276,24 @@ func (d *Decoder) decodeAirbornePosition(ac *Aircraft, me []byte, gnssAlt bool) 
 		return
 	}
 
-	// Altitude
-	altBits := (uint16(me[1])<<4 | uint16(me[2])>>4) & 0xFFF
-	qBit := (altBits >> 4) & 1
+	// Altitude (12-bit field with Q-bit)
+	// Bits: [TC5][SS1][SS0][SAF][Q][...altitude bits...]
+	// The altitude encoding in ME bytes 1-2:
+	// ME[1] bits 7-0 and ME[2] bits 7-4 form the 12-bit altitude code
+	altCode := (uint16(me[1])<<4 | uint16(me[2])>>4) & 0xFFF
+	qBit := (altCode >> 4) & 1
 
 	var altitude int32
-	if qBit == 1 {
-		// Q=1: altitude = N*25 - 1000
-		n := ((altBits & 0xFE0) >> 1) | (altBits & 0x0F)
-		altitude = int32(n)*25 - 1000
+	if altCode == 0 {
+		altitude = 0 // not available
+	} else if qBit == 1 {
+		// Q=1: 25ft resolution
+		// Remove Q-bit (bit 4) and compute: N*25 - 1000
+		n := int32(((altCode>>5)&0x7F)<<4 | (altCode & 0x0F))
+		altitude = n*25 - 1000
 	} else {
-		// Gillham-encoded, simplified
-		altitude = int32(altBits) * 100
+		// Q=0: Gillham code (100ft resolution), simplified
+		altitude = int32(altCode&0x7FF) * 100
 	}
 
 	// CPR latitude and longitude
@@ -310,13 +316,19 @@ func (d *Decoder) decodeAirbornePosition(ac *Aircraft, me []byte, gnssAlt bool) 
 		ac.OddTime = time.Now()
 	}
 
-	// Try to decode position if we have both even and odd
+	// Try to decode position if we have both even and odd within 10 seconds
 	if ac.HasEvenCPR && ac.HasOddCPR {
-		lat, lon, ok := decodeCPRGlobal(ac.EvenLat, ac.EvenLon, ac.OddLat, ac.OddLon, cprOddFlag == 1)
-		if ok {
-			ac.Latitude = lat
-			ac.Longitude = lon
-			ac.PosValid = true
+		timeDiff := ac.EvenTime.Sub(ac.OddTime)
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+		if timeDiff < 10*time.Second {
+			lat, lon, ok := decodeCPRGlobal(ac.EvenLat, ac.EvenLon, ac.OddLat, ac.OddLon, cprOddFlag == 1)
+			if ok {
+				ac.Latitude = lat
+				ac.Longitude = lon
+				ac.PosValid = true
+			}
 		}
 	}
 	d.mu.Unlock()
@@ -384,62 +396,54 @@ func (d *Decoder) decodeAirborneVelocity(ac *Aircraft, me []byte) {
 }
 
 // decodeCPRGlobal performs global CPR decoding to get lat/lon.
+// Requires both even and odd CPR frames to compute absolute position.
 func decodeCPRGlobal(evenLat, evenLon, oddLat, oddLon float64, mostRecentOdd bool) (lat, lon float64, ok bool) {
-	const nzEven = 60.0
-	const nzOdd = 59.0
+	const airDLatEven = 360.0 / 60.0 // 6.0 degrees
+	const airDLatOdd = 360.0 / 59.0  // ~6.1 degrees
 
-	dLatEven := 360.0 / nzEven
-	dLatOdd := 360.0 / nzOdd
+	// Compute latitude index j
+	j := math.Floor(59.0*evenLat - 60.0*oddLat + 0.5)
 
-	// Latitude index
-	j := math.Floor(nzEven*oddLat - nzOdd*evenLat + 0.5)
+	// Compute latitudes for even and odd
+	latEven := airDLatEven * (mod(j, 60.0) + evenLat)
+	latOdd := airDLatOdd * (mod(j, 59.0) + oddLat)
 
-	var latEven, latOdd float64
-	latEven = dLatEven * (mod(j, nzEven) + evenLat)
-	latOdd = dLatOdd * (mod(j, nzOdd) + oddLat)
-
-	if latEven >= 270 {
-		latEven -= 360
+	// Normalize to [-90, 90]
+	if latEven >= 270.0 {
+		latEven -= 360.0
 	}
-	if latOdd >= 270 {
-		latOdd -= 360
+	if latOdd >= 270.0 {
+		latOdd -= 360.0
 	}
 
-	// Check zone consistency
+	// Check NL zone consistency - if they differ, the frames crossed a zone boundary
 	nlEven := cprNL(latEven)
 	nlOdd := cprNL(latOdd)
 	if nlEven != nlOdd {
 		return 0, 0, false
 	}
 
-	// Use the most recent frame
+	// Compute longitude
 	if mostRecentOdd {
 		lat = latOdd
-		nl := cprNL(lat)
-		if nl-1 <= 0 {
-			lon = 360.0 * oddLon
-		} else {
-			dLon := 360.0 / float64(nl-1)
-			m := math.Floor(evenLon*float64(nl-1) - oddLon*float64(nl) + 0.5)
-			lon = dLon * (mod(m, float64(nl-1)) + oddLon)
-		}
+		nl := float64(cprNL(lat))
+		ni := math.Max(nl-1, 1)
+		m := math.Floor(evenLon*(nl-1) - oddLon*nl + 0.5)
+		lon = (360.0 / ni) * (mod(m, ni) + oddLon)
 	} else {
 		lat = latEven
-		nl := cprNL(lat)
-		if nl <= 0 {
-			lon = 360.0 * evenLon
-		} else {
-			dLon := 360.0 / float64(nl)
-			m := math.Floor(evenLon*float64(nl) - oddLon*float64(nl-1) + 0.5)
-			lon = dLon * (mod(m, float64(nl)) + evenLon)
-		}
+		nl := float64(cprNL(lat))
+		ni := math.Max(nl, 1)
+		m := math.Floor(evenLon*(nl-1) - oddLon*nl + 0.5)
+		lon = (360.0 / ni) * (mod(m, ni) + evenLon)
 	}
 
-	if lon > 180 {
-		lon -= 360
+	// Normalize longitude to [-180, 180]
+	if lon >= 180.0 {
+		lon -= 360.0
 	}
 
-	// Sanity check
+	// Final sanity check
 	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
 		return 0, 0, false
 	}
@@ -447,16 +451,130 @@ func decodeCPRGlobal(evenLat, evenLon, oddLat, oddLon float64, mostRecentOdd boo
 	return lat, lon, true
 }
 
-// cprNL returns the number of longitude zones for a given latitude.
+// cprNL returns the number of longitude zones (NL) for a given latitude.
+// This is the key lookup table for CPR decoding per ICAO Annex 10.
 func cprNL(lat float64) int {
-	if math.Abs(lat) >= 87.0 {
+	lat = math.Abs(lat)
+	switch {
+	case lat < 10.47047130:
+		return 59
+	case lat < 14.82817437:
+		return 58
+	case lat < 18.18626357:
+		return 57
+	case lat < 21.02939493:
+		return 56
+	case lat < 23.54504487:
+		return 55
+	case lat < 25.82924707:
+		return 54
+	case lat < 27.93898710:
+		return 53
+	case lat < 29.91135686:
+		return 52
+	case lat < 31.77209708:
+		return 51
+	case lat < 33.53993436:
+		return 50
+	case lat < 35.22899598:
+		return 49
+	case lat < 36.85025108:
+		return 48
+	case lat < 38.41241892:
+		return 47
+	case lat < 39.92256684:
+		return 46
+	case lat < 41.38651832:
+		return 45
+	case lat < 42.80914012:
+		return 44
+	case lat < 44.19454951:
+		return 43
+	case lat < 45.54626723:
+		return 42
+	case lat < 46.86733252:
+		return 41
+	case lat < 48.16039128:
+		return 40
+	case lat < 49.42776439:
+		return 39
+	case lat < 50.67150166:
+		return 38
+	case lat < 51.89342469:
+		return 37
+	case lat < 53.09516153:
+		return 36
+	case lat < 54.27817472:
+		return 35
+	case lat < 55.44378444:
+		return 34
+	case lat < 56.59318756:
+		return 33
+	case lat < 57.72747354:
+		return 32
+	case lat < 58.84763776:
+		return 31
+	case lat < 59.95459277:
+		return 30
+	case lat < 61.04917774:
+		return 29
+	case lat < 62.13216659:
+		return 28
+	case lat < 63.20427479:
+		return 27
+	case lat < 64.26616523:
+		return 26
+	case lat < 65.31845310:
+		return 25
+	case lat < 66.36171008:
+		return 24
+	case lat < 67.39646774:
+		return 23
+	case lat < 68.42322022:
+		return 22
+	case lat < 69.44242631:
+		return 21
+	case lat < 70.45451075:
+		return 20
+	case lat < 71.45986473:
+		return 19
+	case lat < 72.45884545:
+		return 18
+	case lat < 73.45177442:
+		return 17
+	case lat < 74.43893416:
+		return 16
+	case lat < 75.42056257:
+		return 15
+	case lat < 76.39684391:
+		return 14
+	case lat < 77.36789461:
+		return 13
+	case lat < 78.33374083:
+		return 12
+	case lat < 79.29428225:
+		return 11
+	case lat < 80.24923213:
+		return 10
+	case lat < 81.19801349:
+		return 9
+	case lat < 82.13956981:
+		return 8
+	case lat < 83.07199445:
+		return 7
+	case lat < 83.99173563:
+		return 6
+	case lat < 84.89166191:
+		return 5
+	case lat < 85.75541621:
+		return 4
+	case lat < 86.53536998:
+		return 3
+	case lat < 87.00000000:
+		return 2
+	default:
 		return 1
 	}
-	nz := 15.0
-	a := 1 - math.Cos(math.Pi/(2*nz))
-	b := math.Cos(math.Pi / 180.0 * math.Abs(lat))
-	nl := math.Floor(2.0 * math.Pi / math.Acos(1-a/(b*b)))
-	return int(nl)
 }
 
 func mod(a, b float64) float64 {
@@ -504,10 +622,13 @@ func (ac *Aircraft) ToEntityState(seq uint32) generator.EntityState {
 	if ac.PosValid {
 		flags |= generator.FlagPositionValid
 	}
-	if ac.Altitude != 0 {
+	altMeters := float32(ac.Altitude) * 0.3048
+	if ac.Altitude != 0 && ac.Altitude > 0 && ac.Altitude < 60000 {
 		flags |= generator.FlagAltitudeValid
+	} else {
+		altMeters = 0
 	}
-	if ac.Speed > 0 {
+	if ac.Speed > 0 && ac.Speed < 900 {
 		flags |= generator.FlagSpeedValid
 	}
 	if ac.Heading > 0 {
@@ -524,7 +645,7 @@ func (ac *Aircraft) ToEntityState(seq uint32) generator.EntityState {
 		TimestampMs: uint64(ac.LastSeen.UnixMilli()),
 		Latitude:    ac.Latitude,
 		Longitude:   ac.Longitude,
-		AltitudeM:   float32(ac.Altitude) * 0.3048, // feet → meters
+		AltitudeM:   altMeters,
 		SpeedMs:     float32(ac.Speed) * 0.514444,   // knots → m/s
 		HeadingDeg:  float32(ac.Heading),
 		VRateMs:     float32(ac.VRate) * 0.00508,    // ft/min → m/s
