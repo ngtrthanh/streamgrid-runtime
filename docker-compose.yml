@@ -1,46 +1,26 @@
-version: "3.9"
-
 services:
-  # Synthetic telemetry generator
-  generator:
-    build:
-      context: .
-      dockerfile: generator/Dockerfile
-    environment:
-      - ENTITY_COUNT=1000
-      - UPDATE_RATE_HZ=10
-      - SEED=42
-    ports:
-      - "8081:8081"
-    networks:
-      - streamgrid
-
-  # WebTransport edge server
   edge:
     build:
       context: .
-      dockerfile: edge/Dockerfile
+      dockerfile: Dockerfile
     ports:
-      - "4433:4433/udp"  # WebTransport (QUIC/HTTP3)
-      - "4433:4433/tcp"  # WebTransport fallback
-      - "8080:8080"      # WebSocket fallback
-    depends_on:
-      - generator
-    networks:
-      - streamgrid
-
-  # Web client (dev server)
-  web:
-    build:
-      context: .
-      dockerfile: web/Dockerfile
-    ports:
-      - "3000:3000"
-    depends_on:
-      - edge
-    networks:
-      - streamgrid
-
-networks:
-  streamgrid:
-    driver: bridge
+      - "8088:8080"
+      - "4433:4433/udp"
+      - "4433:4433/tcp"
+    command:
+      - "-ws-addr"
+      - ":8080"
+      - "-rate"
+      - "${UPDATE_RATE:-2}"
+      - "-beast"
+      - "${BEAST_ADDR:-10.99.0.1:33005}"
+      - "-nmea"
+      - "${NMEA_ADDR:-host.docker.internal:5015}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
