@@ -123,7 +123,11 @@ func (d *Decoder) Feed(data []byte) int {
 		}
 
 		// Extract and un-escape the frame
-		frame := d.unescape(d.buf[:minLen*2]) // allow for escaped bytes
+		endIdx := minLen * 2
+		if endIdx > len(d.buf) {
+			endIdx = len(d.buf)
+		}
+		frame := d.unescape(d.buf[:endIdx])
 		if frame == nil || len(frame) < 2+6+1+payloadLen {
 			// Not enough data after unescaping, try to get more
 			if len(d.buf) < minLen*2 {

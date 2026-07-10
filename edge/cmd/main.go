@@ -1,14 +1,16 @@
-// Command edge runs the StreamGrid edge server.
+// Command edge runs the StreamGrid edge server with real-world feeds.
 //
-// It connects to the generator (or runs an internal generator) and streams
-// binary entity frames to connected browser clients via WebTransport/WebSocket.
+// Connects to ADS-B Beast and AIS NMEA TCP streams and broadcasts
+// decoded entity state to browser clients via WebSocket.
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,13 +20,14 @@ import (
 
 func main() {
 	var (
-		wsAddr       = flag.String("ws-addr", ":8080", "WebSocket listen address")
-		wtAddr       = flag.String("wt-addr", ":4433", "WebTransport listen address")
-		entityCount  = flag.Int("entities", 1000, "Entity count (internal generator)")
-		updateRate   = flag.Float64("rate", 10, "Update rate Hz (internal generator)")
-		seed         = flag.Int64("seed", 42, "Generator seed")
-		certFile     = flag.String("cert", "", "TLS certificate file")
-		keyFile      = flag.String("key", "", "TLS key file")
+		wsAddr    = flag.String("ws-addr", ":8080", "WebSocket listen address")
+		wtAddr    = flag.String("wt-addr", ":4433", "WebTransport listen address")
+		rate      = flag.Float64("rate", 2, "Update rate Hz")
+		beastAddr = flag.String("beast", "", "Beast TCP feed address (host:port)")
+		nmeaAddr  = flag.String("nmea", "", "NMEA TCP feed address (host:port), comma-separated for multiple")
+		certFile  = flag.String("cert", "", "TLS certificate file")
+		keyFile   = flag.String("key", "", "TLS key file")
+		fallback  = flag.Int("fallback-entities", 0, "Synthetic fallback entity count (0=disabled)")
 	)
 	flag.Parse()
 
@@ -37,45 +40,58 @@ func main() {
 
 	server := edge.New(cfg)
 
-	// Start internal generator
-	genCfg := generator.DefaultConfig()
-	genCfg.EntityCount = *entityCount
-	genCfg.UpdateRateHz = *updateRate
-	genCfg.Seed = *seed
-	gen := generator.New(genCfg)
+	// Configure pipeline
+	pipeCfg := edge.PipelineConfig{
+		UpdateRateHz:   *rate,
+		MaxEntities:    100000,
+		ReconnectDelay: 5 * time.Second,
+	}
+
+	// Optional synthetic fallback
+	if *fallback > 0 {
+		genCfg := generator.DefaultConfig()
+		genCfg.EntityCount = *fallback
+		pipeCfg.FallbackGenerator = generator.New(genCfg)
+	}
+
+	pipeline := edge.NewPipeline(server, pipeCfg)
+
+	// Add feeds
+	if *beastAddr != "" {
+		log.Printf("Adding Beast feed: %s", *beastAddr)
+		pipeline.AddADSBFeed(*beastAddr)
+	}
+	if *nmeaAddr != "" {
+		for _, addr := range strings.Split(*nmeaAddr, ",") {
+			addr = strings.TrimSpace(addr)
+			if addr != "" {
+				log.Printf("Adding NMEA feed: %s", addr)
+				pipeline.AddAISFeed(addr)
+			}
+		}
+	}
 
 	log.Printf("StreamGrid Edge Server starting")
-	log.Printf("  Entities: %d @ %.1f Hz", genCfg.EntityCount, genCfg.UpdateRateHz)
 	log.Printf("  WebSocket: %s", cfg.WSAddr)
-	log.Printf("  WebTransport: %s", cfg.WTAddr)
+	log.Printf("  Update rate: %.1f Hz", *rate)
 
-	// Start frame generation in background
-	go func() {
-		ticker := time.NewTicker(time.Duration(float64(time.Second) / genCfg.UpdateRateHz))
-		defer ticker.Stop()
-
-		states := make([]generator.EntityState, genCfg.EntityCount)
-		buf := make([]byte, generator.FrameHeaderSize+genCfg.EntityCount*generator.EntityStateSize)
-
-		for range ticker.C {
-			gen.TickInto(states)
-			n := generator.EncodeFrameInto(states, buf)
-			server.BroadcastFrame(buf[:n])
-		}
-	}()
-
-	// Start server in background
+	// Start server
 	go func() {
 		if err := server.Start(); err != nil {
 			log.Fatalf("Server error: %v", err)
 		}
 	}()
 
-	// Wait for shutdown signal
+	// Start pipeline
+	ctx, cancel := context.WithCancel(context.Background())
+	go pipeline.Start(ctx)
+
+	// Wait for shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
 	log.Println("Shutting down...")
+	cancel()
 	server.Stop()
 }
