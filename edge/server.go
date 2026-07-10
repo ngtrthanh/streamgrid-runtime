@@ -282,7 +282,7 @@ func (s *Server) Stop() {
 func sharedArrayBufferMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
-		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "credentialless")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		next.ServeHTTP(w, r)
 	})
@@ -396,7 +396,7 @@ func (s *Server) handleWebSocketClient(conn *websocket.Conn) {
 
 	// Write pump
 	for frame := range client.frameCh {
-		conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		err := conn.WriteMessage(websocket.BinaryMessage, frame)
 		if err != nil {
 			return

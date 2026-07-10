@@ -74,9 +74,8 @@
     let renderLastTime = performance.now();
 
     function resize() {
-      canvas.width = window.innerWidth * devicePixelRatio;
-      canvas.height = window.innerHeight * devicePixelRatio;
-      ctx.scale(devicePixelRatio, devicePixelRatio);
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
     }
     resize();
     window.addEventListener('resize', resize);
@@ -172,6 +171,12 @@
         entities = data;
         frameCount++;
         bytesTotal += data.byteLength;
+
+        // Update status on first frame
+        if (frameCount === 1) {
+          document.getElementById('st-status').textContent = 'Streaming';
+          document.getElementById('st-status').style.color = '#0f0';
+        }
       };
 
       ws.onerror = () => {
