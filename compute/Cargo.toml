@@ -1,0 +1,17 @@
+[package]
+name = "streamgrid-compute"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Spatial indexing and GPU compute for StreamGrid"
+
+[dependencies]
+streamgrid-protocol = { path = "../protocol" }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "spatial_index"
+harness = false

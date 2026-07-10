@@ -1,0 +1,16 @@
+[package]
+name = "streamgrid-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Binary protocol encoder/decoder for StreamGrid entity state transport"
+
+[dependencies]
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "encode_decode"
+harness = false

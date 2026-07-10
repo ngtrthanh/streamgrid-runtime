@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StreamGrid Runtime - Live Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      overflow: hidden;
+    }
+    #canvas {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+    }
+    #stats {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      background: rgba(0, 0, 0, 0.75);
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.6;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      min-width: 280px;
+    }
+    #stats .label { color: #888; }
+    #stats .value { color: #0f0; font-weight: bold; }
+    #stats .header { color: #4fc3f7; font-weight: bold; margin-bottom: 4px; }
+    #controls {
+      position: fixed;
+      bottom: 12px;
+      left: 12px;
+      background: rgba(0, 0, 0, 0.75);
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    #controls button {
+      background: #333;
+      color: #fff;
+      border: 1px solid #555;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+    #controls button:hover { background: #444; }
+    #controls button.active { background: #1565c0; border-color: #42a5f5; }
+    #legend {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      background: rgba(0, 0, 0, 0.75);
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    #legend .item { display: flex; align-items: center; margin: 4px 0; }
+    #legend .dot {
+      width: 10px; height: 10px; border-radius: 50%; margin-right: 8px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  
+  <div id="stats">
+    <div class="header">StreamGrid Runtime</div>
+    <div><span class="label">Status: </span><span class="value" id="status">Disconnected</span></div>
+    <div><span class="label">Protocol: </span><span class="value" id="protocol">—</span></div>
+    <div><span class="label">Entities: </span><span class="value" id="entities">0</span></div>
+    <div><span class="label">Server FPS: </span><span class="value" id="serverFps">0</span></div>
+    <div><span class="label">Render FPS: </span><span class="value" id="renderFps">0</span></div>
+    <div><span class="label">Frame time: </span><span class="value" id="frameTime">0</span> ms</div>
+    <div><span class="label">Bandwidth: </span><span class="value" id="bandwidth">0</span> KB/s</div>
+    <div><span class="label">Buffer: </span><span class="value" id="bufferInfo">—</span></div>
+  </div>
+
+  <div id="legend">
+    <div class="item"><div class="dot" style="background:#39f"></div>Aircraft</div>
+    <div class="item"><div class="dot" style="background:#3c8"></div>Vessel</div>
+    <div class="item"><div class="dot" style="background:#fc3"></div>Vehicle</div>
+    <div class="item"><div class="dot" style="background:#c6f"></div>Person</div>
+    <div class="item"><div class="dot" style="background:#f66"></div>Drone/UAV</div>
+    <div class="item"><div class="dot" style="background:#999"></div>Satellite</div>
+    <div class="item"><div class="dot" style="background:#fff"></div>Sensor</div>
+  </div>
+
+  <div id="controls">
+    <button id="btnConnect" class="">Connect</button>
+    <button id="btnDisconnect">Disconnect</button>
+    <input id="urlInput" type="text" value="ws://localhost:8080/ws" 
+           style="width:240px; padding:6px; background:#222; color:#fff; border:1px solid #555; border-radius:4px;">
+  </div>
+
+  <script type="module">
+    import { StreamGridClient, SAB_HEADER_SIZE, ENTITY_SIZE } from './src/client.ts';
+    import { StreamGridRenderer } from './src/renderer.ts';
+
+    // DOM elements
+    const canvas = document.getElementById('canvas');
+    const statusEl = document.getElementById('status');
+    const protocolEl = document.getElementById('protocol');
+    const entitiesEl = document.getElementById('entities');
+    const serverFpsEl = document.getElementById('serverFps');
+    const renderFpsEl = document.getElementById('renderFps');
+    const frameTimeEl = document.getElementById('frameTime');
+    const bandwidthEl = document.getElementById('bandwidth');
+    const bufferInfoEl = document.getElementById('bufferInfo');
+    const btnConnect = document.getElementById('btnConnect');
+    const btnDisconnect = document.getElementById('btnDisconnect');
+    const urlInput = document.getElementById('urlInput');
+
+    // Resize canvas
+    function resizeCanvas() {
+      canvas.width = window.innerWidth * devicePixelRatio;
+      canvas.height = window.innerHeight * devicePixelRatio;
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    // Create client
+    const client = new StreamGridClient({ maxEntities: 100000 });
+
+    // Create renderer
+    const renderer = new StreamGridRenderer({
+      canvas,
+      sharedBuffer: client.getSharedBuffer(),
+      maxEntities: 100000,
+      pointSize: 4,
+      backgroundColor: [0.05, 0.05, 0.12, 1.0],
+    });
+
+    // Initialize renderer
+    const gpuReady = await renderer.init();
+    if (gpuReady) {
+      renderer.start();
+      bufferInfoEl.textContent = `SAB ${(SAB_HEADER_SIZE + 100000 * ENTITY_SIZE) / 1024 / 1024} MB`;
+    } else {
+      bufferInfoEl.textContent = 'WebGPU not available';
+    }
+
+    // Client events
+    client.on((event) => {
+      switch (event.type) {
+        case 'connected':
+          statusEl.textContent = 'Connected';
+          statusEl.style.color = '#0f0';
+          protocolEl.textContent = event.protocol;
+          btnConnect.classList.add('active');
+          break;
+        case 'disconnected':
+          statusEl.textContent = 'Disconnected';
+          statusEl.style.color = '#f55';
+          protocolEl.textContent = '—';
+          btnConnect.classList.remove('active');
+          break;
+        case 'frame':
+          entitiesEl.textContent = event.entityCount.toLocaleString();
+          break;
+        case 'stats':
+          serverFpsEl.textContent = event.fps.toString();
+          bandwidthEl.textContent = (event.bytesPerSec / 1024).toFixed(1);
+          break;
+        case 'error':
+          statusEl.textContent = `Error: ${event.message}`;
+          statusEl.style.color = '#f90';
+          break;
+      }
+    });
+
+    // Update render stats
+    setInterval(() => {
+      const stats = renderer.getStats();
+      renderFpsEl.textContent = stats.fps.toString();
+      frameTimeEl.textContent = stats.frameTimeMs.toFixed(1);
+    }, 500);
+
+    // Controls
+    btnConnect.addEventListener('click', () => {
+      const url = urlInput.value;
+      const protocol = url.startsWith('wss') || url.startsWith('https') ? 'wt' : 'ws';
+      client.connect(url, protocol);
+    });
+
+    btnDisconnect.addEventListener('click', () => {
+      client.disconnect();
+    });
+  </script>
+</body>
+</html>

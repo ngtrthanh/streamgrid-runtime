@@ -1,0 +1,17 @@
+{
+  "name": "@streamgrid/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "StreamGrid browser client - WebTransport/WebSocket with SharedArrayBuffer",
+  "main": "src/client.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "vite",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "vite": "6.3.5"
+  }
+}

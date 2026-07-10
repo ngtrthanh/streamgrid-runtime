@@ -1,0 +1,27 @@
+# Rust
+/target/
+
+# Go
+/bin/
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark outputs (keep results/, exclude raw criterion data)
+/target/criterion/
+
+# Secrets
+.env
+*.pem
+*.key
