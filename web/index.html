@@ -3,195 +3,217 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>StreamGrid Runtime - Live Demo</title>
+  <title>StreamGrid Runtime - Live</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #1a1a2e;
-      color: #eee;
-      overflow: hidden;
-    }
-    #canvas {
-      width: 100vw;
-      height: 100vh;
-      display: block;
-    }
-    #stats {
-      position: fixed;
-      top: 12px;
-      left: 12px;
-      background: rgba(0, 0, 0, 0.75);
-      padding: 12px 16px;
-      border-radius: 8px;
-      font-size: 13px;
-      line-height: 1.6;
-      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-      min-width: 280px;
-    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
+    #canvas { width: 100vw; height: 100vh; display: block; background: #0d0d1a; }
+    #stats { position: fixed; top: 12px; left: 12px; background: rgba(0,0,0,0.8); padding: 12px 16px; border-radius: 8px; font-size: 13px; line-height: 1.7; font-family: 'SF Mono', Monaco, monospace; min-width: 260px; }
     #stats .label { color: #888; }
     #stats .value { color: #0f0; font-weight: bold; }
-    #stats .header { color: #4fc3f7; font-weight: bold; margin-bottom: 4px; }
-    #controls {
-      position: fixed;
-      bottom: 12px;
-      left: 12px;
-      background: rgba(0, 0, 0, 0.75);
-      padding: 12px 16px;
-      border-radius: 8px;
-      font-size: 13px;
-    }
-    #controls button {
-      background: #333;
-      color: #fff;
-      border: 1px solid #555;
-      padding: 6px 12px;
-      border-radius: 4px;
-      cursor: pointer;
-      margin-right: 8px;
-    }
-    #controls button:hover { background: #444; }
-    #controls button.active { background: #1565c0; border-color: #42a5f5; }
-    #legend {
-      position: fixed;
-      top: 12px;
-      right: 12px;
-      background: rgba(0, 0, 0, 0.75);
-      padding: 12px 16px;
-      border-radius: 8px;
-      font-size: 12px;
-    }
+    #stats .header { color: #4fc3f7; font-weight: bold; margin-bottom: 4px; font-size: 14px; }
+    #legend { position: fixed; top: 12px; right: 12px; background: rgba(0,0,0,0.8); padding: 12px 16px; border-radius: 8px; font-size: 12px; }
     #legend .item { display: flex; align-items: center; margin: 4px 0; }
-    #legend .dot {
-      width: 10px; height: 10px; border-radius: 50%; margin-right: 8px;
-    }
+    #legend .dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+    #controls { position: fixed; bottom: 12px; left: 12px; background: rgba(0,0,0,0.8); padding: 10px 14px; border-radius: 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+    #controls button { background: #1565c0; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+    #controls button:hover { background: #1976d2; }
+    #controls input { padding: 5px 8px; background: #222; color: #fff; border: 1px solid #444; border-radius: 4px; width: 200px; }
   </style>
 </head>
 <body>
   <canvas id="canvas"></canvas>
-  
   <div id="stats">
     <div class="header">StreamGrid Runtime</div>
-    <div><span class="label">Status: </span><span class="value" id="status">Disconnected</span></div>
-    <div><span class="label">Protocol: </span><span class="value" id="protocol">—</span></div>
-    <div><span class="label">Entities: </span><span class="value" id="entities">0</span></div>
-    <div><span class="label">Server FPS: </span><span class="value" id="serverFps">0</span></div>
-    <div><span class="label">Render FPS: </span><span class="value" id="renderFps">0</span></div>
-    <div><span class="label">Frame time: </span><span class="value" id="frameTime">0</span> ms</div>
-    <div><span class="label">Bandwidth: </span><span class="value" id="bandwidth">0</span> KB/s</div>
-    <div><span class="label">Buffer: </span><span class="value" id="bufferInfo">—</span></div>
+    <div><span class="label">Status: </span><span class="value" id="st-status">Connecting...</span></div>
+    <div><span class="label">Protocol: </span><span class="value" id="st-proto">WebSocket</span></div>
+    <div><span class="label">Entities: </span><span class="value" id="st-entities">0</span></div>
+    <div><span class="label">Frames/s: </span><span class="value" id="st-fps">0</span></div>
+    <div><span class="label">Bandwidth: </span><span class="value" id="st-bw">0</span> KB/s</div>
+    <div><span class="label">Frame size: </span><span class="value" id="st-size">0</span> KB</div>
+    <div><span class="label">Render FPS: </span><span class="value" id="st-rfps">0</span></div>
   </div>
-
   <div id="legend">
-    <div class="item"><div class="dot" style="background:#39f"></div>Aircraft</div>
-    <div class="item"><div class="dot" style="background:#3c8"></div>Vessel</div>
+    <div class="item"><div class="dot" style="background:#4af"></div>Aircraft</div>
+    <div class="item"><div class="dot" style="background:#4c8"></div>Vessel</div>
     <div class="item"><div class="dot" style="background:#fc3"></div>Vehicle</div>
-    <div class="item"><div class="dot" style="background:#c6f"></div>Person</div>
-    <div class="item"><div class="dot" style="background:#f66"></div>Drone/UAV</div>
-    <div class="item"><div class="dot" style="background:#999"></div>Satellite</div>
-    <div class="item"><div class="dot" style="background:#fff"></div>Sensor</div>
+    <div class="item"><div class="dot" style="background:#f66"></div>Drone</div>
+    <div class="item"><div class="dot" style="background:#fff"></div>Other</div>
   </div>
-
   <div id="controls">
-    <button id="btnConnect" class="">Connect</button>
-    <button id="btnDisconnect">Disconnect</button>
-    <input id="urlInput" type="text" value="ws://localhost:8080/ws" 
-           style="width:240px; padding:6px; background:#222; color:#fff; border:1px solid #555; border-radius:4px;">
+    <input id="url" type="text" value="">
+    <button id="btn">Connect</button>
   </div>
 
-  <script type="module">
-    import { StreamGridClient, SAB_HEADER_SIZE, ENTITY_SIZE } from './src/client.ts';
-    import { StreamGridRenderer } from './src/renderer.ts';
+  <script>
+    // Auto-detect WebSocket URL
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProto}//${location.host}/ws`;
+    document.getElementById('url').value = wsUrl;
 
-    // DOM elements
+    const ENTITY_SIZE = 64;
+    const FRAME_HEADER = 16;
+    const MAGIC = 0x53475246;
+
+    // State
+    let ws = null;
+    let entities = null; // ArrayBuffer of current frame
+    let entityCount = 0;
+    let frameCount = 0;
+    let bytesTotal = 0;
+    let lastStatsTime = performance.now();
+    let lastFrameCount = 0;
+    let lastBytes = 0;
+
+    // Canvas 2D fallback renderer (works without WebGPU)
     const canvas = document.getElementById('canvas');
-    const statusEl = document.getElementById('status');
-    const protocolEl = document.getElementById('protocol');
-    const entitiesEl = document.getElementById('entities');
-    const serverFpsEl = document.getElementById('serverFps');
-    const renderFpsEl = document.getElementById('renderFps');
-    const frameTimeEl = document.getElementById('frameTime');
-    const bandwidthEl = document.getElementById('bandwidth');
-    const bufferInfoEl = document.getElementById('bufferInfo');
-    const btnConnect = document.getElementById('btnConnect');
-    const btnDisconnect = document.getElementById('btnDisconnect');
-    const urlInput = document.getElementById('urlInput');
+    const ctx = canvas.getContext('2d');
+    let animId = null;
+    let renderFps = 0;
+    let renderFrames = 0;
+    let renderLastTime = performance.now();
 
-    // Resize canvas
-    function resizeCanvas() {
+    function resize() {
       canvas.width = window.innerWidth * devicePixelRatio;
       canvas.height = window.innerHeight * devicePixelRatio;
+      ctx.scale(devicePixelRatio, devicePixelRatio);
     }
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
+    resize();
+    window.addEventListener('resize', resize);
 
-    // Create client
-    const client = new StreamGridClient({ maxEntities: 100000 });
+    // Map projection (simple equirectangular)
+    const mapBounds = { minLat: -85, maxLat: 85, minLon: -180, maxLon: 180 };
 
-    // Create renderer
-    const renderer = new StreamGridRenderer({
-      canvas,
-      sharedBuffer: client.getSharedBuffer(),
-      maxEntities: 100000,
-      pointSize: 4,
-      backgroundColor: [0.05, 0.05, 0.12, 1.0],
-    });
-
-    // Initialize renderer
-    const gpuReady = await renderer.init();
-    if (gpuReady) {
-      renderer.start();
-      bufferInfoEl.textContent = `SAB ${(SAB_HEADER_SIZE + 100000 * ENTITY_SIZE) / 1024 / 1024} MB`;
-    } else {
-      bufferInfoEl.textContent = 'WebGPU not available';
+    function latLonToXY(lat, lon) {
+      const x = ((lon - mapBounds.minLon) / (mapBounds.maxLon - mapBounds.minLon)) * window.innerWidth;
+      const y = ((mapBounds.maxLat - lat) / (mapBounds.maxLat - mapBounds.minLat)) * window.innerHeight;
+      return [x, y];
     }
 
-    // Client events
-    client.on((event) => {
-      switch (event.type) {
-        case 'connected':
-          statusEl.textContent = 'Connected';
-          statusEl.style.color = '#0f0';
-          protocolEl.textContent = event.protocol;
-          btnConnect.classList.add('active');
-          break;
-        case 'disconnected':
-          statusEl.textContent = 'Disconnected';
-          statusEl.style.color = '#f55';
-          protocolEl.textContent = '—';
-          btnConnect.classList.remove('active');
-          break;
-        case 'frame':
-          entitiesEl.textContent = event.entityCount.toLocaleString();
-          break;
-        case 'stats':
-          serverFpsEl.textContent = event.fps.toString();
-          bandwidthEl.textContent = (event.bytesPerSec / 1024).toFixed(1);
-          break;
-        case 'error':
-          statusEl.textContent = `Error: ${event.message}`;
-          statusEl.style.color = '#f90';
-          break;
+    const typeColors = {
+      1: '#4af',  // Aircraft
+      2: '#4c8',  // Vessel
+      3: '#fc3',  // Vehicle
+      5: '#f66',  // Drone
+    };
+
+    function render() {
+      animId = requestAnimationFrame(render);
+      renderFrames++;
+
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+
+      ctx.fillStyle = '#0d0d1a';
+      ctx.fillRect(0, 0, w, h);
+
+      if (!entities || entityCount === 0) return;
+
+      const view = new DataView(entities);
+      const count = Math.min(entityCount, 50000); // Cap rendering
+
+      for (let i = 0; i < count; i++) {
+        const off = FRAME_HEADER + i * ENTITY_SIZE;
+        if (off + ENTITY_SIZE > entities.byteLength) break;
+
+        const flags = view.getUint16(off + 4, true);
+        if (!(flags & 0x02)) continue; // Skip if position not valid
+
+        const type = view.getUint8(off + 6);
+        const lat = view.getFloat64(off + 16, true);
+        const lon = view.getFloat64(off + 24, true);
+
+        if (lat === 0 && lon === 0) continue;
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
+
+        const [x, y] = latLonToXY(lat, lon);
+        const color = typeColors[type] || '#888';
+        const size = type === 1 ? 2.5 : 2;
+
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.fill();
       }
-    });
 
-    // Update render stats
+      // Render FPS
+      const now = performance.now();
+      if (now - renderLastTime >= 1000) {
+        renderFps = renderFrames;
+        renderFrames = 0;
+        renderLastTime = now;
+      }
+    }
+
+    function connect(url) {
+      if (ws) { ws.close(); ws = null; }
+
+      document.getElementById('st-status').textContent = 'Connecting...';
+      document.getElementById('st-status').style.color = '#ff0';
+
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        document.getElementById('st-status').textContent = 'Connected';
+        document.getElementById('st-status').style.color = '#0f0';
+      };
+
+      ws.onmessage = (event) => {
+        if (!(event.data instanceof ArrayBuffer)) return;
+        const data = event.data;
+        if (data.byteLength < FRAME_HEADER) return;
+
+        const view = new DataView(data);
+        const magic = view.getUint32(0, true);
+        if (magic !== MAGIC) return;
+
+        entityCount = view.getUint16(6, true);
+        entities = data;
+        frameCount++;
+        bytesTotal += data.byteLength;
+      };
+
+      ws.onerror = () => {
+        document.getElementById('st-status').textContent = 'Error';
+        document.getElementById('st-status').style.color = '#f55';
+      };
+
+      ws.onclose = () => {
+        document.getElementById('st-status').textContent = 'Disconnected';
+        document.getElementById('st-status').style.color = '#f55';
+        // Auto-reconnect after 3s
+        setTimeout(() => connect(url), 3000);
+      };
+    }
+
+    // Stats update
     setInterval(() => {
-      const stats = renderer.getStats();
-      renderFpsEl.textContent = stats.fps.toString();
-      frameTimeEl.textContent = stats.frameTimeMs.toFixed(1);
-    }, 500);
+      const now = performance.now();
+      const elapsed = (now - lastStatsTime) / 1000;
+      const fps = (frameCount - lastFrameCount) / elapsed;
+      const bw = (bytesTotal - lastBytes) / elapsed / 1024;
+      const frameSize = entities ? entities.byteLength / 1024 : 0;
 
-    // Controls
-    btnConnect.addEventListener('click', () => {
-      const url = urlInput.value;
-      const protocol = url.startsWith('wss') || url.startsWith('https') ? 'wt' : 'ws';
-      client.connect(url, protocol);
+      document.getElementById('st-entities').textContent = entityCount.toLocaleString();
+      document.getElementById('st-fps').textContent = fps.toFixed(1);
+      document.getElementById('st-bw').textContent = bw.toFixed(0);
+      document.getElementById('st-size').textContent = frameSize.toFixed(0);
+      document.getElementById('st-rfps').textContent = renderFps;
+
+      lastStatsTime = now;
+      lastFrameCount = frameCount;
+      lastBytes = bytesTotal;
+    }, 1000);
+
+    // Start
+    document.getElementById('btn').addEventListener('click', () => {
+      connect(document.getElementById('url').value);
     });
 
-    btnDisconnect.addEventListener('click', () => {
-      client.disconnect();
-    });
+    // Auto-connect
+    connect(wsUrl);
+    render();
   </script>
 </body>
 </html>
