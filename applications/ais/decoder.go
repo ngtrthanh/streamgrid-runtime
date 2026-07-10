@@ -168,10 +168,10 @@ func (d *Decoder) decodePositionClassA(bits []byte) bool {
 	mmsi := uint32(bitsToUint(bits, 8, 30))
 	status := uint8(bitsToUint(bits, 38, 4))
 	rot := bitsToInt(bits, 42, 8)
-	sog := bitsToUint(bits, 46, 10)     // 1/10 knot
-	posAcc := bitsToUint(bits, 56, 1)
-	lonRaw := bitsToInt(bits, 57, 28)    // 1/10000 min
-	latRaw := bitsToInt(bits, 85, 27)    // 1/10000 min
+	sog := bitsToUint(bits, 50, 10)     // 1/10 knot
+	posAcc := bitsToUint(bits, 60, 1)
+	lonRaw := bitsToInt(bits, 61, 28)    // 1/10000 min
+	latRaw := bitsToInt(bits, 89, 27)    // 1/10000 min
 	cog := bitsToUint(bits, 116, 12)     // 1/10 degree
 	heading := bitsToUint(bits, 128, 9)  // degrees
 	_ = posAcc
