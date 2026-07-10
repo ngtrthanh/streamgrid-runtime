@@ -3,159 +3,203 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>StreamGrid Runtime - Live</title>
+  <title>StreamGrid Runtime</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
-    #canvas { width: 100vw; height: 100vh; display: block; background: #0d0d1a; }
-    #stats { position: fixed; top: 12px; left: 12px; background: rgba(0,0,0,0.8); padding: 12px 16px; border-radius: 8px; font-size: 13px; line-height: 1.7; font-family: 'SF Mono', Monaco, monospace; min-width: 260px; }
-    #stats .label { color: #888; }
-    #stats .value { color: #0f0; font-weight: bold; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    #map { width: 100vw; height: 100vh; }
+    #stats {
+      position: fixed; top: 12px; left: 12px; z-index: 1000;
+      background: rgba(0,0,0,0.85); color: #eee;
+      padding: 12px 16px; border-radius: 8px;
+      font-size: 13px; line-height: 1.7;
+      font-family: 'SF Mono', Monaco, monospace;
+      min-width: 240px; pointer-events: none;
+    }
     #stats .header { color: #4fc3f7; font-weight: bold; margin-bottom: 4px; font-size: 14px; }
-    #legend { position: fixed; top: 12px; right: 12px; background: rgba(0,0,0,0.8); padding: 12px 16px; border-radius: 8px; font-size: 12px; }
-    #legend .item { display: flex; align-items: center; margin: 4px 0; }
+    #stats .label { color: #999; }
+    #stats .value { color: #0f0; font-weight: bold; }
+    #stats .value.warn { color: #f90; }
+    #stats .value.err { color: #f55; }
+    #legend {
+      position: fixed; bottom: 30px; left: 12px; z-index: 1000;
+      background: rgba(0,0,0,0.85); color: #eee;
+      padding: 10px 14px; border-radius: 8px; font-size: 12px;
+    }
+    #legend .item { display: flex; align-items: center; margin: 3px 0; }
     #legend .dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
-    #controls { position: fixed; bottom: 12px; left: 12px; background: rgba(0,0,0,0.8); padding: 10px 14px; border-radius: 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
-    #controls button { background: #1565c0; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
-    #controls button:hover { background: #1976d2; }
-    #controls input { padding: 5px 8px; background: #222; color: #fff; border: 1px solid #444; border-radius: 4px; width: 200px; }
   </style>
 </head>
 <body>
-  <canvas id="canvas"></canvas>
+  <div id="map"></div>
+
   <div id="stats">
     <div class="header">StreamGrid Runtime</div>
     <div><span class="label">Status: </span><span class="value" id="st-status">Connecting...</span></div>
-    <div><span class="label">Protocol: </span><span class="value" id="st-proto">WebSocket</span></div>
     <div><span class="label">Entities: </span><span class="value" id="st-entities">0</span></div>
+    <div><span class="label">Aircraft: </span><span class="value" id="st-aircraft">0</span></div>
+    <div><span class="label">Vessels: </span><span class="value" id="st-vessels">0</span></div>
     <div><span class="label">Frames/s: </span><span class="value" id="st-fps">0</span></div>
     <div><span class="label">Bandwidth: </span><span class="value" id="st-bw">0</span> KB/s</div>
-    <div><span class="label">Frame size: </span><span class="value" id="st-size">0</span> KB</div>
-    <div><span class="label">Render FPS: </span><span class="value" id="st-rfps">0</span></div>
   </div>
+
   <div id="legend">
-    <div class="item"><div class="dot" style="background:#4af"></div>Aircraft</div>
-    <div class="item"><div class="dot" style="background:#4c8"></div>Vessel</div>
-    <div class="item"><div class="dot" style="background:#fc3"></div>Vehicle</div>
-    <div class="item"><div class="dot" style="background:#f66"></div>Drone</div>
-    <div class="item"><div class="dot" style="background:#fff"></div>Other</div>
-  </div>
-  <div id="controls">
-    <input id="url" type="text" value="">
-    <button id="btn">Connect</button>
+    <div class="item"><div class="dot" style="background:#4488ff"></div>Aircraft</div>
+    <div class="item"><div class="dot" style="background:#44cc88"></div>Vessel</div>
+    <div class="item"><div class="dot" style="background:#ffcc33"></div>Vehicle</div>
+    <div class="item"><div class="dot" style="background:#ff6666"></div>Drone</div>
+    <div class="item"><div class="dot" style="background:#aaaaaa"></div>Other</div>
   </div>
 
   <script>
-    // Auto-detect WebSocket URL
-    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProto}//${location.host}/ws`;
-    document.getElementById('url').value = wsUrl;
-
+    // --- Config ---
     const ENTITY_SIZE = 64;
     const FRAME_HEADER = 16;
     const MAGIC = 0x53475246;
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProto}//${location.host}/ws`;
 
-    // State
+    // Entity type colors
+    const TYPE_COLORS = { 1: '#4488ff', 2: '#44cc88', 3: '#ffcc33', 5: '#ff6666' };
+    const DEFAULT_COLOR = '#aaaaaa';
+
+    // --- Map ---
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: {
+        version: 8,
+        sources: {
+          'osm-raster': {
+            type: 'raster',
+            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tileSize: 256,
+            attribution: '&copy; OpenStreetMap contributors'
+          }
+        },
+        layers: [{
+          id: 'osm-raster-layer',
+          type: 'raster',
+          source: 'osm-raster',
+          minzoom: 0,
+          maxzoom: 19
+        }]
+      },
+      center: [135, -25], // Australia
+      zoom: 3,
+      attributionControl: true
+    });
+
+    // --- GeoJSON source for entities ---
+    let geojsonData = { type: 'FeatureCollection', features: [] };
+
+    map.on('load', () => {
+      // Add entity source
+      map.addSource('entities', {
+        type: 'geojson',
+        data: geojsonData
+      });
+
+      // Aircraft layer (circles)
+      map.addLayer({
+        id: 'entities-aircraft',
+        type: 'circle',
+        source: 'entities',
+        filter: ['==', ['get', 'entityType'], 1],
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 2, 6, 4, 10, 6],
+          'circle-color': '#4488ff',
+          'circle-opacity': 0.85,
+          'circle-stroke-width': 0.5,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+
+      // Vessel layer
+      map.addLayer({
+        id: 'entities-vessel',
+        type: 'circle',
+        source: 'entities',
+        filter: ['==', ['get', 'entityType'], 2],
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 2, 6, 3, 10, 5],
+          'circle-color': '#44cc88',
+          'circle-opacity': 0.85,
+          'circle-stroke-width': 0.5,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+
+      // Other entities
+      map.addLayer({
+        id: 'entities-other',
+        type: 'circle',
+        source: 'entities',
+        filter: ['all',
+          ['!=', ['get', 'entityType'], 1],
+          ['!=', ['get', 'entityType'], 2]
+        ],
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 2, 6, 3, 10, 5],
+          'circle-color': ['match', ['get', 'entityType'],
+            3, '#ffcc33',
+            5, '#ff6666',
+            '#aaaaaa'
+          ],
+          'circle-opacity': 0.8
+        }
+      });
+
+      // Popup on click
+      map.on('click', 'entities-aircraft', (e) => {
+        const props = e.features[0].properties;
+        new maplibregl.Popup()
+          .setLngLat(e.lngLat)
+          .setHTML(`<b>Aircraft</b><br>ID: ${props.entityId}<br>Alt: ${props.altitude}m<br>Speed: ${props.speed} m/s<br>Heading: ${props.heading}°`)
+          .addTo(map);
+      });
+      map.on('click', 'entities-vessel', (e) => {
+        const props = e.features[0].properties;
+        new maplibregl.Popup()
+          .setLngLat(e.lngLat)
+          .setHTML(`<b>Vessel</b><br>MMSI: ${props.entityId}<br>Speed: ${props.speed} m/s<br>Heading: ${props.heading}°`)
+          .addTo(map);
+      });
+
+      // Cursor
+      map.on('mouseenter', 'entities-aircraft', () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', 'entities-aircraft', () => map.getCanvas().style.cursor = '');
+      map.on('mouseenter', 'entities-vessel', () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', 'entities-vessel', () => map.getCanvas().style.cursor = '');
+
+      // Start WebSocket connection after map is ready
+      connect();
+    });
+
+    // --- WebSocket ---
     let ws = null;
-    let entities = null; // ArrayBuffer of current frame
     let entityCount = 0;
+    let aircraftCount = 0;
+    let vesselCount = 0;
     let frameCount = 0;
     let bytesTotal = 0;
     let lastStatsTime = performance.now();
     let lastFrameCount = 0;
     let lastBytes = 0;
 
-    // Canvas 2D fallback renderer (works without WebGPU)
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
-    let animId = null;
-    let renderFps = 0;
-    let renderFrames = 0;
-    let renderLastTime = performance.now();
-
-    function resize() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    }
-    resize();
-    window.addEventListener('resize', resize);
-
-    // Map projection (simple equirectangular)
-    const mapBounds = { minLat: -85, maxLat: 85, minLon: -180, maxLon: 180 };
-
-    function latLonToXY(lat, lon) {
-      const x = ((lon - mapBounds.minLon) / (mapBounds.maxLon - mapBounds.minLon)) * window.innerWidth;
-      const y = ((mapBounds.maxLat - lat) / (mapBounds.maxLat - mapBounds.minLat)) * window.innerHeight;
-      return [x, y];
-    }
-
-    const typeColors = {
-      1: '#4af',  // Aircraft
-      2: '#4c8',  // Vessel
-      3: '#fc3',  // Vehicle
-      5: '#f66',  // Drone
-    };
-
-    function render() {
-      animId = requestAnimationFrame(render);
-      renderFrames++;
-
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-
-      ctx.fillStyle = '#0d0d1a';
-      ctx.fillRect(0, 0, w, h);
-
-      if (!entities || entityCount === 0) return;
-
-      const view = new DataView(entities);
-      const count = Math.min(entityCount, 50000); // Cap rendering
-
-      for (let i = 0; i < count; i++) {
-        const off = FRAME_HEADER + i * ENTITY_SIZE;
-        if (off + ENTITY_SIZE > entities.byteLength) break;
-
-        const flags = view.getUint16(off + 4, true);
-        if (!(flags & 0x02)) continue; // Skip if position not valid
-
-        const type = view.getUint8(off + 6);
-        const lat = view.getFloat64(off + 16, true);
-        const lon = view.getFloat64(off + 24, true);
-
-        if (lat === 0 && lon === 0) continue;
-        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
-
-        const [x, y] = latLonToXY(lat, lon);
-        const color = typeColors[type] || '#888';
-        const size = type === 1 ? 2.5 : 2;
-
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(x, y, size, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Render FPS
-      const now = performance.now();
-      if (now - renderLastTime >= 1000) {
-        renderFps = renderFrames;
-        renderFrames = 0;
-        renderLastTime = now;
-      }
-    }
-
-    function connect(url) {
+    function connect() {
       if (ws) { ws.close(); ws = null; }
 
       document.getElementById('st-status').textContent = 'Connecting...';
-      document.getElementById('st-status').style.color = '#ff0';
+      document.getElementById('st-status').className = 'value warn';
 
-      ws = new WebSocket(url);
+      ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
         document.getElementById('st-status').textContent = 'Connected';
-        document.getElementById('st-status').style.color = '#0f0';
+        document.getElementById('st-status').className = 'value';
       };
 
       ws.onmessage = (event) => {
@@ -167,58 +211,86 @@
         const magic = view.getUint32(0, true);
         if (magic !== MAGIC) return;
 
-        entityCount = view.getUint16(6, true);
-        entities = data;
+        const count = view.getUint16(6, true);
+        entityCount = count;
         frameCount++;
         bytesTotal += data.byteLength;
 
-        // Update status on first frame
-        if (frameCount === 1) {
-          document.getElementById('st-status').textContent = 'Streaming';
-          document.getElementById('st-status').style.color = '#0f0';
-        }
+        // Parse entities into GeoJSON
+        updateGeoJSON(view, count, data.byteLength);
       };
 
       ws.onerror = () => {
         document.getElementById('st-status').textContent = 'Error';
-        document.getElementById('st-status').style.color = '#f55';
+        document.getElementById('st-status').className = 'value err';
       };
 
       ws.onclose = () => {
-        document.getElementById('st-status').textContent = 'Disconnected';
-        document.getElementById('st-status').style.color = '#f55';
-        // Auto-reconnect after 3s
-        setTimeout(() => connect(url), 3000);
+        document.getElementById('st-status').textContent = 'Reconnecting...';
+        document.getElementById('st-status').className = 'value warn';
+        setTimeout(connect, 3000);
       };
     }
 
-    // Stats update
+    function updateGeoJSON(view, count, byteLength) {
+      const features = [];
+      let ac = 0, vs = 0;
+
+      for (let i = 0; i < count; i++) {
+        const off = FRAME_HEADER + i * ENTITY_SIZE;
+        if (off + ENTITY_SIZE > byteLength) break;
+
+        const flags = view.getUint16(off + 4, true);
+        if (!(flags & 0x02)) continue; // position not valid
+
+        const entityType = view.getUint8(off + 6);
+        const lat = view.getFloat64(off + 16, true);
+        const lon = view.getFloat64(off + 24, true);
+
+        if (lat === 0 && lon === 0) continue;
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
+
+        const entityId = view.getUint32(off, true);
+        const altitude = Math.round(view.getFloat32(off + 32, true));
+        const speed = view.getFloat32(off + 36, true).toFixed(1);
+        const heading = Math.round(view.getFloat32(off + 40, true));
+
+        if (entityType === 1) ac++;
+        else if (entityType === 2) vs++;
+
+        features.push({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [lon, lat] },
+          properties: { entityId, entityType, altitude, speed, heading }
+        });
+      }
+
+      aircraftCount = ac;
+      vesselCount = vs;
+
+      geojsonData = { type: 'FeatureCollection', features };
+
+      const src = map.getSource('entities');
+      if (src) src.setData(geojsonData);
+    }
+
+    // --- Stats ---
     setInterval(() => {
       const now = performance.now();
       const elapsed = (now - lastStatsTime) / 1000;
       const fps = (frameCount - lastFrameCount) / elapsed;
       const bw = (bytesTotal - lastBytes) / elapsed / 1024;
-      const frameSize = entities ? entities.byteLength / 1024 : 0;
 
       document.getElementById('st-entities').textContent = entityCount.toLocaleString();
+      document.getElementById('st-aircraft').textContent = aircraftCount.toLocaleString();
+      document.getElementById('st-vessels').textContent = vesselCount.toLocaleString();
       document.getElementById('st-fps').textContent = fps.toFixed(1);
       document.getElementById('st-bw').textContent = bw.toFixed(0);
-      document.getElementById('st-size').textContent = frameSize.toFixed(0);
-      document.getElementById('st-rfps').textContent = renderFps;
 
       lastStatsTime = now;
       lastFrameCount = frameCount;
       lastBytes = bytesTotal;
     }, 1000);
-
-    // Start
-    document.getElementById('btn').addEventListener('click', () => {
-      connect(document.getElementById('url').value);
-    });
-
-    // Auto-connect
-    connect(wsUrl);
-    render();
   </script>
 </body>
 </html>
