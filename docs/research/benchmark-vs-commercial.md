@@ -61,15 +61,21 @@ on the stale timeout configured in the pipeline.
 
 ### Coverage Comparison (not architecture)
 
-| | StreamGrid | FR24 | MarineTraffic |
+| | StreamGrid (this instance) | FR24 | MarineTraffic |
 |---|---|---|---|
-| Aircraft feeders | 1 (this receiver) | **25,000+** | N/A |
-| AIS feeders | 96 online | N/A | **3,000+** |
-| Total aircraft | ~6,500 | **200,000+** | N/A |
-| Total vessels | ~5,000+ | N/A | **800,000+** |
+| Feeders | 1 ADS-B + 96 AIS | **40,000+** ADS-B | **3,000+** AIS |
+| Concurrent aircraft | ~6,500 | **~20,000 peak** | N/A |
+| Daily flights tracked | N/A | 200,000+ | N/A |
+| Concurrent vessels | ~5,000+ | N/A | ~100,000+ active |
+| Coverage gaps | Via single receiver | China, Russia, Africa limited | Similar gaps |
 
-StreamGrid cannot compete on **coverage** — that requires a global network of feeders.
-It competes on **architecture efficiency per entity** and **self-hosted capability**.
+**Key fact**: Global peak concurrent airborne aircraft is only ~20,000-24,000
+(AirNav record: 24,115 on June 19, 2025). FR24 claims 200K+ flights/day but that's
+cumulative across 24 hours, not simultaneous. At any given moment, FR24 shows ~15,000-20,000.
+
+**This means StreamGrid's 6,520 aircraft from a single aggregated Beast feed represents
+~30-40% of global concurrent traffic.** The coverage gap is primarily China, Russia,
+and parts of Africa where ADS-B receiver networks are sparse.
 
 ## What StreamGrid Actually Demonstrates
 
