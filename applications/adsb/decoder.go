@@ -37,6 +37,7 @@ type Aircraft struct {
 	Heading    float64 // degrees
 	VRate      int32 // feet/min
 	LastSeen   time.Time
+	LastPosTime time.Time
 	PosValid   bool
 	HasOddCPR  bool
 	HasEvenCPR bool
@@ -48,6 +49,8 @@ type Aircraft struct {
 	EvenTime  time.Time
 	Category   uint8
 	Squawk     uint16
+	MsgCount   uint32
+	PosCount   uint32
 }
 
 // Decoder decodes Beast-format binary streams into aircraft state.
@@ -213,6 +216,13 @@ func (d *Decoder) decodeModeSLong(payload []byte) {
 		return
 	}
 
+	// CRC-24 validation — reject corrupt messages
+	valid, _ := ValidateCRC(payload)
+	if !valid {
+		d.errCount++
+		return
+	}
+
 	df := (payload[0] >> 3) & 0x1F
 	if df != 17 && df != 18 {
 		return // Only DF17 (ADS-B) and DF18 (TIS-B)
@@ -277,9 +287,6 @@ func (d *Decoder) decodeAirbornePosition(ac *Aircraft, me []byte, gnssAlt bool) 
 	}
 
 	// Altitude (12-bit field with Q-bit)
-	// Bits: [TC5][SS1][SS0][SAF][Q][...altitude bits...]
-	// The altitude encoding in ME bytes 1-2:
-	// ME[1] bits 7-0 and ME[2] bits 7-4 form the 12-bit altitude code
 	altCode := (uint16(me[1])<<4 | uint16(me[2])>>4) & 0xFFF
 	qBit := (altCode >> 4) & 1
 
@@ -288,7 +295,6 @@ func (d *Decoder) decodeAirbornePosition(ac *Aircraft, me []byte, gnssAlt bool) 
 		altitude = 0 // not available
 	} else if qBit == 1 {
 		// Q=1: 25ft resolution
-		// Remove Q-bit (bit 4) and compute: N*25 - 1000
 		n := int32(((altCode>>5)&0x7F)<<4 | (altCode & 0x0F))
 		altitude = n*25 - 1000
 	} else {
@@ -296,42 +302,77 @@ func (d *Decoder) decodeAirbornePosition(ac *Aircraft, me []byte, gnssAlt bool) 
 		altitude = int32(altCode&0x7FF) * 100
 	}
 
+	// Altitude sanity check
+	if !validateAltitude(altitude) {
+		return
+	}
+
 	// CPR latitude and longitude
 	cprOddFlag := (me[2] >> 2) & 1
 	latCPR := float64(uint32(me[2]&0x03)<<15|uint32(me[3])<<7|uint32(me[4])>>1) / 131072.0
 	lonCPR := float64(uint32(me[4]&0x01)<<16|uint32(me[5])<<8|uint32(me[6])) / 131072.0
 
-	d.mu.Lock()
-	ac.Altitude = altitude
+	now := time.Now()
+	isOdd := cprOddFlag == 1
 
-	if cprOddFlag == 0 {
-		ac.EvenLat = latCPR
-		ac.EvenLon = lonCPR
-		ac.HasEvenCPR = true
-		ac.EvenTime = time.Now()
-	} else {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	ac.Altitude = altitude
+	ac.MsgCount++
+
+	// Store CPR frame
+	if isOdd {
 		ac.OddLat = latCPR
 		ac.OddLon = lonCPR
 		ac.HasOddCPR = true
-		ac.OddTime = time.Now()
+		ac.OddTime = now
+	} else {
+		ac.EvenLat = latCPR
+		ac.EvenLon = lonCPR
+		ac.HasEvenCPR = true
+		ac.EvenTime = now
 	}
 
-	// Try to decode position if we have both even and odd within 10 seconds
-	if ac.HasEvenCPR && ac.HasOddCPR {
+	// Attempt position decode
+	var lat, lon float64
+	var ok bool
+
+	if ac.PosValid {
+		// Local CPR decode (preferred after initial fix)
+		lat, lon, ok = decodeCPRLocal(ac.Latitude, ac.Longitude, latCPR, lonCPR, isOdd)
+		if ok {
+			// Sanity check against previous position
+			if !validatePosition(ac, lat, lon, now) {
+				ok = false
+			}
+		}
+	}
+
+	if !ok && ac.HasEvenCPR && ac.HasOddCPR {
+		// Fall back to global CPR decode
 		timeDiff := ac.EvenTime.Sub(ac.OddTime)
 		if timeDiff < 0 {
 			timeDiff = -timeDiff
 		}
-		if timeDiff < 10*time.Second {
-			lat, lon, ok := decodeCPRGlobal(ac.EvenLat, ac.EvenLon, ac.OddLat, ac.OddLon, cprOddFlag == 1)
-			if ok {
-				ac.Latitude = lat
-				ac.Longitude = lon
-				ac.PosValid = true
+		if timeDiff < cprGlobalMaxAge {
+			lat, lon, ok = decodeCPRGlobal(ac.EvenLat, ac.EvenLon, ac.OddLat, ac.OddLon, isOdd)
+			if ok && ac.PosValid {
+				// Even global decode must pass sanity check after first fix
+				if !validatePosition(ac, lat, lon, now) {
+					ok = false
+				}
 			}
 		}
 	}
-	d.mu.Unlock()
+
+	if ok {
+		ac.Latitude = lat
+		ac.Longitude = lon
+		ac.PosValid = true
+		ac.LastPosTime = now
+		ac.PosCount++
+	}
 }
 
 // decodeAirborneVelocity decodes TC 19: Airborne velocity.

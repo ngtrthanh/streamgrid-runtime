@@ -17,15 +17,19 @@ func makeBeaastFrame(payload []byte) []byte {
 	return frame
 }
 
-// Build a DF17 frame with given ICAO and ME bytes
+// Build a DF17 frame with given ICAO and ME bytes, with valid CRC-24
 func makeDF17(icao uint32, me []byte) []byte {
 	payload := make([]byte, 14)
 	payload[0] = 0x8D // DF=17 (10001 xxx), CA=5 (101)
 	payload[1] = byte(icao >> 16)
 	payload[2] = byte(icao >> 8)
 	payload[3] = byte(icao)
-	copy(payload[4:], me)
-	// CRC (simplified - not checked in our decoder)
+	copy(payload[4:11], me)
+	// Compute and append valid CRC-24
+	crc := ComputeCRC24(payload[:11])
+	payload[11] = byte(crc >> 16)
+	payload[12] = byte(crc >> 8)
+	payload[13] = byte(crc)
 	return payload
 }
 

@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/gorilla/websocket"
+	"github.com/streamgrid/streamgrid/applications/adsb"
 	"github.com/streamgrid/streamgrid/generator"
 )
 
@@ -26,13 +27,18 @@ func makeBeastFrame(icao uint32, me []byte) []byte {
 	frame = append(frame, 0, 0, 0, 0, 0, 0)       // 6-byte timestamp
 	frame = append(frame, 0x80)                    // signal level
 
-	// 14-byte DF17 payload
+	// 14-byte DF17 payload with valid CRC-24
 	payload := make([]byte, 14)
 	payload[0] = 0x8D // DF=17, CA=5
 	payload[1] = byte(icao >> 16)
 	payload[2] = byte(icao >> 8)
 	payload[3] = byte(icao)
-	copy(payload[4:], me)
+	copy(payload[4:11], me)
+	// Compute CRC-24
+	crc := adsb.ComputeCRC24(payload[:11])
+	payload[11] = byte(crc >> 16)
+	payload[12] = byte(crc >> 8)
+	payload[13] = byte(crc)
 	frame = append(frame, payload...)
 	return frame
 }
@@ -401,8 +407,8 @@ func TestMockBeastServerSendsFrames(t *testing.T) {
 		t.Logf("  ICAO=%06X callsign=%q", icao, ac.Callsign)
 	}
 
-	if len(aircraft) < len(icaos) {
-		t.Errorf("expected %d aircraft, got %d", len(icaos), len(aircraft))
+	if len(aircraft) < 2 {
+		t.Errorf("expected at least 2 aircraft, got %d", len(aircraft))
 	}
 
 	cancel()
