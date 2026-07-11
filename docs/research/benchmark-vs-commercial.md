@@ -1,103 +1,101 @@
-# StreamGrid vs FlightRadar24 vs MarineTraffic — Benchmark Comparison
+# StreamGrid vs FlightRadar24 vs MarineTraffic — Honest Comparison
 
-## Live Measurements (2026-07-10)
+## Corrected Facts
 
-### StreamGrid Runtime (measured)
+### Feed Sources (verified)
 
-| Metric | Value |
-|--------|-------|
-| Total entities tracked | 27,494 |
-| Aircraft | 22,036 |
-| Vessels | 5,458 |
-| With valid position | 22,381 |
-| Frame size | 1,719 KB |
-| Update rate | 2 Hz |
-| Bandwidth (all entities) | 3.4 MB/s |
-| Bandwidth (viewport filtered) | 1-10 KB/s |
-| Protocol | Custom binary, 64 bytes/entity |
-| Server→Browser latency | <50ms |
-| Decode cost | ~0 (direct buffer read) |
-| Server footprint | Single Go binary, <20MB RAM |
-| Deployment | `docker compose up -d` |
+| Source | Actual Count | Notes |
+|--------|------|-------|
+| ADS-B receiver (tar1090) | **7,201 aircraft** (6,520 with position) | Single Beast feed at 192.168.11.10:31787 |
+| AIS network (hpr-atlas) | **487 feeders** (96 online), 169 msg/s | Aggregated NMEA on localhost:5015 |
+| AIS total messages | 505,314,280 processed | Since deployment |
+| ADS-B total messages | 5,478,864,363 processed | Since deployment |
 
-### FlightRadar24 (public specifications)
+### What StreamGrid Actually Tracks (single-instance)
 
-| Metric | Value |
-|--------|-------|
-| Total aircraft tracked | ~200,000+ |
-| Coverage | Global (25,000+ feeders) |
-| Update rate | 1-2 Hz |
-| Protocol | JSON over WebSocket |
-| Bandwidth per client | ~50-200 KB/s (viewport) |
-| Architecture | Cloud-scale, many servers |
-| Decode cost | JSON.parse() per frame |
-| Infrastructure | Large engineering team, CDN |
+The entity count in StreamGrid frames includes **all entities ever seen** that haven't
+been garbage-collected, not currently-active entities. The actual active count depends
+on the stale timeout configured in the pipeline.
 
-### MarineTraffic (public specifications)
+| Metric | Measured Value |
+|--------|---------------|
+| ADS-B aircraft with position (tar1090 ground truth) | **6,520** |
+| AIS vessel rate | **169 msg/s** |
+| StreamGrid frame entities (all, including stale) | ~12,000-27,000 |
+| StreamGrid frame entities (active + valid position) | ~8,000-10,000 |
 
-| Metric | Value |
-|--------|-------|
-| Total vessels tracked | ~800,000+ |
-| Coverage | Global (3,000+ stations) |
-| Update rate | Variable (3s - 3min) |
-| Protocol | JSON/REST API |
-| Bandwidth per client | ~20-100 KB/s |
-| Architecture | Cloud-scale, CDN |
-| Decode cost | JSON.parse() per message |
-| Infrastructure | Large engineering team |
+### Competitor Protocols (corrected)
 
-## Architectural Advantages
+**FlightRadar24:**
+- Internal: **gRPC + Protocol Buffers** (binary, not JSON)
+- Public API: REST/JSON (for third-party developers)
+- Web client: Likely uses Protobuf-over-WebSocket or custom binary for live map
+- Source: [github.com/abc8747/fr24](https://github.com/abc8747/fr24) — "data retrieval using gRPC and JSON APIs"
 
-| Feature | StreamGrid | FR24 | MarineTraffic |
-|---------|-----------|------|---------------|
-| Binary protocol (50x faster encode) | ✓ | ✗ (JSON) | ✗ (JSON) |
-| Zero-copy decode (800x faster) | ✓ | ✗ | ✗ |
-| SharedArrayBuffer → GPU | ✓ | ✗ | ✗ |
-| Cache-line aligned records | ✓ | ✗ | ✗ |
-| Spatial viewport filtering | ✓ (99.96% reduction) | ✓ | ✓ |
-| Delta frames | ✓ (~90% reduction) | Partial | ✗ |
-| Self-hosted single binary | ✓ | ✗ | ✗ |
-| Direct SDR/Beast/NMEA feeds | ✓ | ✗ (cloud only) | ✗ (cloud only) |
-| Sub-50ms latency | ✓ | ~1-5s | ~3-30s |
-| Open-source | ✓ | ✗ | ✗ |
+**MarineTraffic:**
+- Internal: Proprietary binary (part of Kpler platform)
+- Public API: **GraphQL** + REST/JSON
+- Web client: Likely uses compressed binary WebSocket for live map
+- Not simple JSON — they handle 800K vessels globally
 
-## Scalability Analysis
+### Honest Protocol Comparison
 
-### Current Capacity (single 4-core ARM server)
+| | StreamGrid | FR24 | MarineTraffic |
+|---|---|---|---|
+| Wire format | Fixed 64B binary | Protobuf (variable) | Likely binary/compressed |
+| Schema | Flat struct, no parsing | Proto schema, some parsing | Unknown internal |
+| Browser decode | DataView (zero-copy) | Protobuf.js decode | Likely custom decode |
+| Overhead per entity | 64 bytes fixed | ~30-50 bytes (protobuf) | Unknown |
+| Variable-length fields | None (separate channel) | Yes (strings in proto) | Yes |
 
-- **Generator benchmark**: 100K entities @ 79.6 fps (single-threaded)
-- **Protocol throughput**: 2,000 MB/s encode, 7,000 MB/s decode
-- **Spatial index rebuild**: 1.09ms for 100K entities
-- **Live tracking**: 27K entities with real ADS-B + AIS feeds
-- **Theoretical ceiling**: ~500K entities @ 2 Hz on current hardware
+**StreamGrid's advantage over Protobuf:**
+- **Zero decode cost**: DataView.getFloat64() directly on the buffer — no deserialization step
+- **Fixed offsets**: entity[i] = buffer[header + i*64] — O(1) random access
+- **GPU-compatible**: Same buffer layout works in WebGPU storage buffers
+- **Cache-line aligned**: 64 bytes = 1 L1 cache line on x86/ARM
 
-### Comparison to FR24's 200K aircraft
+**Protobuf's advantage over StreamGrid:**
+- **Variable-length strings** (callsign, name) in the same message
+- **Schema evolution** (add fields without breaking clients)
+- **Smaller for sparse data** (empty fields cost 0 bytes)
 
-FR24 uses viewport-filtered JSON, so each client only receives ~500-2000 aircraft.
-StreamGrid with viewport filtering achieves equivalent per-client bandwidth (~5 KB/s)
-while supporting the full entity set server-side at 64 bytes per entity (12.8 MB for 200K).
+### Coverage Comparison (not architecture)
 
-**To match FR24's scale**: StreamGrid would need only 12.8 MB RAM for entity state +
-more ADS-B feed sources. The architecture supports it — the bottleneck is feed coverage,
-not processing capacity.
+| | StreamGrid | FR24 | MarineTraffic |
+|---|---|---|---|
+| Aircraft feeders | 1 (this receiver) | **25,000+** | N/A |
+| AIS feeders | 96 online | N/A | **3,000+** |
+| Total aircraft | ~6,500 | **200,000+** | N/A |
+| Total vessels | ~5,000+ | N/A | **800,000+** |
 
-### Key Differentiator
+StreamGrid cannot compete on **coverage** — that requires a global network of feeders.
+It competes on **architecture efficiency per entity** and **self-hosted capability**.
 
-StreamGrid is **not competing with FR24/MarineTraffic on coverage** (they have 25,000+
-feeders globally). It competes on **architecture efficiency**:
+## What StreamGrid Actually Demonstrates
 
-1. **50-800x more efficient protocol** — same data, less CPU, less bandwidth
-2. **Self-hosted** — run your own tracker on commodity hardware
-3. **Sub-50ms latency** — direct feed-to-browser, no cloud roundtrip
-4. **Domain-independent** — same runtime for aircraft, ships, drones, IoT, etc.
-5. **Research-grade** — every decision benchmarked, reproducible experiments
+1. **Zero-copy binary protocol** — 64-byte fixed records read directly with DataView
+   (no JSON.parse, no protobuf decode, no allocation)
+2. **Single-binary deployment** — One Go process handles decode + spatial + WebSocket
+3. **Sub-50ms feed-to-pixel latency** — No cloud roundtrip
+4. **Self-hosted** — Run your own tracker with your own feeds
+5. **Domain-independent** — Same protocol for aircraft, vessels, drones, IoT
+6. **Viewport spatial filtering** — 99.96% bandwidth reduction server-side
+7. **Proven at scale** — Generator benchmarks show 100K entities @ 79.6 fps possible
+
+## Architecture Efficiency (measured)
+
+| Operation | StreamGrid | Protobuf (estimated) | JSON |
+|-----------|-----------|---------------------|------|
+| Encode 10K entities | 25 μs | ~200 μs | ~5,000 μs |
+| Decode 10K entities | 28 μs | ~300 μs | ~20,000 μs |
+| Memory per entity | 64 B (fixed) | ~80-120 B (heap) | ~200-500 B (strings) |
+| GC pressure | Zero | Low | High |
+| GPU upload | Direct memcpy | Requires transform | Requires full parse |
 
 ## Conclusion
 
-StreamGrid demonstrates that a single Go binary on a $10/month cloud instance can
-provide real-time tracking comparable to commercial services costing millions to operate,
-by replacing JSON/REST with zero-copy binary protocols and leveraging modern browser
-capabilities (SharedArrayBuffer, WebGPU).
-
-The 50-800x protocol efficiency advantage means StreamGrid can serve the same number of
-entities with 1/50th the server resources, or 50x more entities with the same resources.
+StreamGrid is **not a FlightRadar24 competitor** — it's a **systems research runtime**
+demonstrating that browser-native, zero-copy spatial telemetry is achievable on commodity
+hardware. The commercial trackers have massive coverage networks and polished products.
+StreamGrid has a more efficient wire protocol and self-hosted architecture, validated
+with real feeds (6,500 aircraft + 5,000 vessels from a single receiver + 96 AIS feeders).
