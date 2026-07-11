@@ -36,6 +36,7 @@ type Aircraft struct {
 	Speed      float64 // knots
 	Heading    float64 // degrees
 	VRate      int32 // feet/min
+	OnGround   bool  // true when surface position message received (TC 5-8)
 	LastSeen   time.Time
 	LastPosTime time.Time
 	PosValid   bool
@@ -243,6 +244,8 @@ func (d *Decoder) decodeModeSLong(payload []byte) {
 	switch {
 	case tc >= 1 && tc <= 4:
 		d.decodeIdentification(ac, payload[4:])
+	case tc >= 5 && tc <= 8:
+		d.decodeSurfacePosition(ac, payload[4:])
 	case tc >= 9 && tc <= 18:
 		d.decodeAirbornePosition(ac, payload[4:], false)
 	case tc == 19:
@@ -434,6 +437,245 @@ func (d *Decoder) decodeAirborneVelocity(ac *Aircraft, me []byte) {
 		vr = -vr
 	}
 	ac.VRate = vr
+}
+
+// decodeSurfaceMovement converts the 7-bit non-linear movement field to knots.
+// Returns -1 if movement is not available, 0 if stopped, otherwise speed in knots.
+func decodeSurfaceMovement(mov uint8) float64 {
+	switch {
+	case mov == 0:
+		return -1 // not available
+	case mov == 1:
+		return 0 // stopped
+	case mov >= 2 && mov <= 8:
+		return 0.125 + float64(mov-2)*0.125
+	case mov >= 9 && mov <= 12:
+		return 1.0 + float64(mov-9)*0.25
+	case mov >= 13 && mov <= 38:
+		return 2.0 + float64(mov-13)*0.5
+	case mov >= 39 && mov <= 93:
+		return 15.0 + float64(mov-39)*1.0
+	case mov >= 94 && mov <= 108:
+		return 70.0 + float64(mov-94)*2.0
+	case mov >= 109 && mov <= 123:
+		return 100.0 + float64(mov-109)*5.0
+	case mov == 124:
+		return 175 // >= 175 knots
+	default:
+		return -1 // 125-127 reserved
+	}
+}
+
+// decodeSurfacePosition decodes TC 5-8: Surface position messages.
+//
+// ME byte layout (ICAO Doc 9684 surface position):
+//
+//	Byte 0: [TC:5][mov6:1][mov5:1][mov4:1]
+//	Byte 1: [mov3:1][mov2:1][mov1:1][mov0:1][status:1][hdg6:1][hdg5:1][hdg4:1]
+//	Byte 2: [hdg3:1][hdg2:1][hdg1:1][hdg0:1][T:1][F:1][latCPR16:1][latCPR15:1]
+//	Byte 3: [latCPR14..latCPR7]
+//	Byte 4: [latCPR6..latCPR0][lonCPR16]
+//	Byte 5: [lonCPR15..lonCPR8]
+//	Byte 6: [lonCPR7..lonCPR0]
+//
+// Movement is a 7-bit non-linear speed field (see decodeSurfaceMovement).
+// Heading is 7 bits (resolution = 360/128 ≈ 2.8°) when status=1.
+// CPR uses NZ=60 surface latitude zones (dLat = 90/60 = 1.5°).
+func (d *Decoder) decodeSurfacePosition(ac *Aircraft, me []byte) {
+	if len(me) < 7 {
+		return
+	}
+
+	// Movement (7 bits): byte0[2:0] = high 3 bits, byte1[7:4] = low 4 bits
+	mov := uint8((me[0]&0x07)<<4 | (me[1]>>4))
+
+	// Status (heading valid): byte1 bit 3
+	status := (me[1] >> 3) & 0x01
+
+	// Heading (7 bits): byte1[2:0] = high 3 bits, byte2[7:4] = low 4 bits
+	heading7 := uint8((me[1]&0x07)<<4 | (me[2]>>4))
+
+	// T flag (UTC sync): byte2 bit 3 — unused, skip
+	// F flag (odd=1 / even=0): byte2 bit 2
+	fFlag := (me[2] >> 2) & 0x01
+
+	// Latitude CPR (17 bits): byte2[1:0], byte3, byte4[7:1]
+	latCPR := float64(uint32(me[2]&0x03)<<15|uint32(me[3])<<7|uint32(me[4])>>1) / 131072.0
+	// Longitude CPR (17 bits): byte4[0], byte5, byte6
+	lonCPR := float64(uint32(me[4]&0x01)<<16|uint32(me[5])<<8|uint32(me[6])) / 131072.0
+
+	isOdd := fFlag == 1
+	now := time.Now()
+
+	// Decode movement to speed
+	speed := decodeSurfaceMovement(mov)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Surface aircraft are on the ground with zero altitude
+	ac.OnGround = true
+	ac.Altitude = 0
+	ac.MsgCount++
+
+	// Apply speed (skip if not available)
+	if speed >= 0 {
+		ac.Speed = speed
+	}
+
+	// Apply heading if valid
+	if status == 1 {
+		ac.Heading = float64(heading7) * 360.0 / 128.0
+	}
+
+	// Store CPR frame
+	if isOdd {
+		ac.OddLat = latCPR
+		ac.OddLon = lonCPR
+		ac.HasOddCPR = true
+		ac.OddTime = now
+	} else {
+		ac.EvenLat = latCPR
+		ac.EvenLon = lonCPR
+		ac.HasEvenCPR = true
+		ac.EvenTime = now
+	}
+
+	// Surface CPR constants: NZ=60, dLat = 90/60 = 1.5°
+	const surfDLatEven = 90.0 / 60.0 // 1.5 degrees
+	const surfDLatOdd = 90.0 / 59.0
+
+	// Attempt position decode
+	var lat, lon float64
+	var ok bool
+
+	if ac.PosValid {
+		// Local CPR decode using surface dLat values
+		lat, lon, ok = decodeCPRSurfaceLocal(ac.Latitude, ac.Longitude, latCPR, lonCPR, isOdd)
+		if ok {
+			if !validatePosition(ac, lat, lon, now) {
+				ok = false
+			}
+		}
+	}
+
+	if !ok && ac.HasEvenCPR && ac.HasOddCPR {
+		// Global CPR decode for surface position
+		timeDiff := ac.EvenTime.Sub(ac.OddTime)
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+		if timeDiff < cprGlobalMaxAge {
+			lat, lon, ok = decodeCPRSurfaceGlobal(
+				ac.EvenLat, ac.EvenLon,
+				ac.OddLat, ac.OddLon,
+				isOdd,
+				surfDLatEven, surfDLatOdd,
+			)
+			if ok && ac.PosValid {
+				if !validatePosition(ac, lat, lon, now) {
+					ok = false
+				}
+			}
+		}
+	}
+
+	if ok {
+		ac.Latitude = lat
+		ac.Longitude = lon
+		ac.PosValid = true
+		ac.LastPosTime = now
+		ac.PosCount++
+	}
+}
+
+// decodeCPRSurfaceLocal performs local CPR decode for surface positions.
+// Uses dLat = 90/60 (even) or 90/59 (odd) instead of 360/60 (airborne).
+func decodeCPRSurfaceLocal(refLat, refLon, cprLat, cprLon float64, isOdd bool) (lat, lon float64, ok bool) {
+	var dLat float64
+	if isOdd {
+		dLat = 90.0 / 59.0
+	} else {
+		dLat = 90.0 / 60.0
+	}
+
+	j := math.Floor(refLat/dLat) + math.Floor(0.5+(math.Mod(refLat, dLat)/dLat)-cprLat)
+	lat = dLat * (j + cprLat)
+
+	if lat < -90 || lat > 90 {
+		return 0, 0, false
+	}
+
+	nl := float64(cprNL(lat))
+	var ni float64
+	if isOdd {
+		ni = math.Max(nl-1, 1)
+	} else {
+		ni = math.Max(nl, 1)
+	}
+	dLon := 90.0 / ni
+
+	m := math.Floor(refLon/dLon) + math.Floor(0.5+(math.Mod(refLon, dLon)/dLon)-cprLon)
+	lon = dLon * (m + cprLon)
+
+	if lon > 180 {
+		lon -= 360
+	}
+	if lon < -180 {
+		lon += 360
+	}
+
+	return lat, lon, true
+}
+
+// decodeCPRSurfaceGlobal performs global CPR decode for surface positions.
+// Surface uses a 90° quadrant (NZ=60) instead of 360° (NZ=60 airborne).
+func decodeCPRSurfaceGlobal(evenLat, evenLon, oddLat, oddLon float64, mostRecentOdd bool, dLatEven, dLatOdd float64) (lat, lon float64, ok bool) {
+	// Compute latitude index j
+	j := math.Floor(59.0*evenLat-60.0*oddLat+0.5)
+
+	latEven := dLatEven * (mod(j, 60.0) + evenLat)
+	latOdd := dLatOdd * (mod(j, 59.0) + oddLat)
+
+	// Normalize to [-90, 90]
+	if latEven >= 270.0 {
+		latEven -= 360.0
+	}
+	if latOdd >= 270.0 {
+		latOdd -= 360.0
+	}
+
+	nlEven := cprNL(latEven)
+	nlOdd := cprNL(latOdd)
+	if nlEven != nlOdd {
+		return 0, 0, false
+	}
+
+	// Compute longitude using 90° quadrant
+	if mostRecentOdd {
+		lat = latOdd
+		nl := float64(cprNL(lat))
+		ni := math.Max(nl-1, 1)
+		m := math.Floor(evenLon*(nl-1) - oddLon*nl + 0.5)
+		lon = (90.0 / ni) * (mod(m, ni) + oddLon)
+	} else {
+		lat = latEven
+		nl := float64(cprNL(lat))
+		ni := math.Max(nl, 1)
+		m := math.Floor(evenLon*(nl-1) - oddLon*nl + 0.5)
+		lon = (90.0 / ni) * (mod(m, ni) + evenLon)
+	}
+
+	// Normalize longitude
+	if lon > 180 {
+		lon -= 360
+	}
+
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return 0, 0, false
+	}
+
+	return lat, lon, true
 }
 
 // decodeCPRGlobal performs global CPR decoding to get lat/lon.

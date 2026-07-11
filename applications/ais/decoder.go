@@ -26,23 +26,25 @@ import (
 
 // Vessel represents the tracked state of a single AIS vessel.
 type Vessel struct {
-	MMSI       uint32
-	Name       string
-	Callsign   string
-	IMO        uint32
-	ShipType   uint8
-	Latitude   float64
-	Longitude  float64
-	Speed      float64 // knots (SOG)
-	Course     float64 // degrees (COG)
-	Heading    float64 // degrees (true heading)
-	ROT        float64 // rate of turn, degrees/min
-	Status     uint8   // navigational status
-	LastSeen   time.Time
-	PosValid   bool
-	Draught    float64 // meters
+	MMSI        uint32
+	Name        string
+	Callsign    string
+	IMO         uint32
+	ShipType    uint8
+	Latitude    float64
+	Longitude   float64
+	Speed       float64 // knots (SOG)
+	Course      float64 // degrees (COG)
+	Heading     float64 // degrees (true heading)
+	ROT         float64 // rate of turn, degrees/min
+	Status      uint8   // navigational status
+	LastSeen    time.Time
+	LastPosTime time.Time // time of last valid position update
+	PosValid    bool
+	Draught     float64 // meters
 	Destination string
 	DimA, DimB, DimC, DimD uint16 // ship dimensions
+	MsgCount    uint32 // total messages decoded for this vessel
 }
 
 // Decoder decodes AIS NMEA sentences into vessel state.
@@ -160,6 +162,7 @@ func (d *Decoder) FeedLine(line string) bool {
 }
 
 // decodePositionClassA decodes message types 1, 2, 3.
+// Bit offsets per ITU-R M.1371-5 Table 9.
 func (d *Decoder) decodePositionClassA(bits []byte) bool {
 	if len(bits) < 168 {
 		return false
@@ -168,21 +171,24 @@ func (d *Decoder) decodePositionClassA(bits []byte) bool {
 	mmsi := uint32(bitsToUint(bits, 8, 30))
 	status := uint8(bitsToUint(bits, 38, 4))
 	rot := bitsToInt(bits, 42, 8)
-	sog := bitsToUint(bits, 50, 10)     // 1/10 knot
-	posAcc := bitsToUint(bits, 60, 1)
-	lonRaw := bitsToInt(bits, 61, 28)    // 1/10000 min
-	latRaw := bitsToInt(bits, 89, 27)    // 1/10000 min
-	cog := bitsToUint(bits, 116, 12)     // 1/10 degree
-	heading := bitsToUint(bits, 128, 9)  // degrees
-	_ = posAcc
+	sog := bitsToUint(bits, 50, 10)    // 1/10 knot
+	lonRaw := bitsToInt(bits, 61, 28)  // 1/10000 min
+	latRaw := bitsToInt(bits, 89, 27)  // 1/10000 min
+	cog := bitsToUint(bits, 116, 12)   // 1/10 degree
+	heading := bitsToUint(bits, 128, 9) // degrees
 
-	// Convert position
+	// Convert position (1/10000 minute = 1/600000 degree)
 	lat := float64(latRaw) / 600000.0
 	lon := float64(lonRaw) / 600000.0
 
-	// Validate
+	// "not available" sentinel values per ITU-R M.1371-5
 	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
-		latRaw != 0x3412140 && lonRaw != 0x6791AC0 // AIS "not available" values
+		latRaw != 0x3412140 && lonRaw != 0x6791AC0
+
+	sogKnots := float64(sog) / 10.0
+	if sog == 1023 { // not available
+		sogKnots = -1
+	}
 
 	d.mu.Lock()
 	v, exists := d.vessels[mmsi]
@@ -190,16 +196,44 @@ func (d *Decoder) decodePositionClassA(bits []byte) bool {
 		v = &Vessel{MMSI: mmsi}
 		d.vessels[mmsi] = v
 	}
-	v.LastSeen = time.Now()
+	now := time.Now()
+	v.LastSeen = now
+	v.MsgCount++
 	v.Status = status
+
 	if posValid {
-		v.Latitude = lat
-		v.Longitude = lon
-		v.PosValid = true
+		// SOG sanity: reject > 102 knots for any vessel;
+		// reject > 50 knots for cargo/tanker ship types 60–89.
+		sogOK := sogKnots < 0 || sogKnots <= 102.0
+		if sogOK && sogKnots >= 0 && v.ShipType >= 60 && v.ShipType <= 89 {
+			sogOK = sogKnots <= 50.0
+		}
+
+		// Position jump check: reject implausible jumps unless > 5 minutes elapsed.
+		posAccepted := true
+		if v.PosValid && !v.LastPosTime.IsZero() {
+			gap := now.Sub(v.LastPosTime)
+			if gap < 5*time.Minute {
+				dlat := lat - v.Latitude
+				dlon := lon - v.Longitude
+				dist := math.Sqrt(dlat*dlat + dlon*dlon)
+				if dist > 0.33 { // ~20 NM
+					posAccepted = false
+				}
+			}
+		}
+
+		if posAccepted && sogOK {
+			v.Latitude = lat
+			v.Longitude = lon
+			v.PosValid = true
+			v.LastPosTime = now
+		}
+		if sogOK && sogKnots >= 0 {
+			v.Speed = sogKnots
+		}
 	}
-	if sog != 1023 { // 1023 = not available
-		v.Speed = float64(sog) / 10.0
-	}
+
 	if cog != 3600 { // 3600 = not available
 		v.Course = float64(cog) / 10.0
 	}
@@ -218,6 +252,7 @@ func (d *Decoder) decodePositionClassA(bits []byte) bool {
 }
 
 // decodeStaticVoyage decodes message type 5.
+// Bit offsets per ITU-R M.1371-5 Table 12 (424 bits).
 func (d *Decoder) decodeStaticVoyage(bits []byte) bool {
 	if len(bits) < 424 {
 		return false
@@ -225,19 +260,20 @@ func (d *Decoder) decodeStaticVoyage(bits []byte) bool {
 
 	mmsi := uint32(bitsToUint(bits, 8, 30))
 	imo := uint32(bitsToUint(bits, 40, 30))
-	callsign := bitsToString(bits, 70, 42)
-	name := bitsToString(bits, 112, 120)
+	callsign := bitsToString(bits, 70, 42)   // 7 chars
+	name := bitsToString(bits, 112, 120)      // 20 chars
 	shipType := uint8(bitsToUint(bits, 232, 8))
 	dimA := uint16(bitsToUint(bits, 240, 9))
 	dimB := uint16(bitsToUint(bits, 249, 9))
 	dimC := uint16(bitsToUint(bits, 258, 6))
 	dimD := uint16(bitsToUint(bits, 264, 6))
+	// ETA: bits 274-293 (month 4b, day 5b, hour 5b, minute 6b)
+	// etaMonth := bitsToUint(bits, 274, 4)
+	// etaDay   := bitsToUint(bits, 278, 5)
+	// etaHour  := bitsToUint(bits, 283, 5)
+	// etaMin   := bitsToUint(bits, 288, 6)
 	draught := float64(bitsToUint(bits, 294, 8)) / 10.0
-
-	var dest string
-	if len(bits) >= 404 {
-		dest = bitsToString(bits, 302, 120)
-	}
+	dest := bitsToString(bits, 302, 120) // 20 chars
 
 	d.mu.Lock()
 	v, exists := d.vessels[mmsi]
@@ -246,6 +282,7 @@ func (d *Decoder) decodeStaticVoyage(bits []byte) bool {
 		d.vessels[mmsi] = v
 	}
 	v.LastSeen = time.Now()
+	v.MsgCount++
 	v.IMO = imo
 	v.Callsign = strings.TrimRight(callsign, "@ ")
 	v.Name = strings.TrimRight(name, "@ ")
@@ -265,21 +302,30 @@ func (d *Decoder) decodeStaticVoyage(bits []byte) bool {
 }
 
 // decodePositionClassB decodes message type 18.
+// Bit offsets per ITU-R M.1371-5 Table 46 (168 bits).
 func (d *Decoder) decodePositionClassB(bits []byte) bool {
 	if len(bits) < 168 {
 		return false
 	}
 
 	mmsi := uint32(bitsToUint(bits, 8, 30))
-	sog := bitsToUint(bits, 46, 10)
-	lonRaw := bitsToInt(bits, 57, 28)
-	latRaw := bitsToInt(bits, 85, 27)
-	cog := bitsToUint(bits, 112, 12)
-	heading := bitsToUint(bits, 124, 9)
+	// reserved: 38-45 (8 bits)
+	sog := bitsToUint(bits, 46, 10)     // 1/10 knot
+	// posAcc: bit 56
+	lonRaw := bitsToInt(bits, 57, 28)   // 1/10000 min
+	latRaw := bitsToInt(bits, 85, 27)   // 1/10000 min
+	cog := bitsToUint(bits, 112, 12)    // 1/10 degree
+	heading := bitsToUint(bits, 124, 9) // degrees
 
 	lat := float64(latRaw) / 600000.0
 	lon := float64(lonRaw) / 600000.0
-	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+		latRaw != 0x3412140 && lonRaw != 0x6791AC0
+
+	sogKnots := float64(sog) / 10.0
+	if sog == 1023 {
+		sogKnots = -1
+	}
 
 	d.mu.Lock()
 	v, exists := d.vessels[mmsi]
@@ -287,15 +333,41 @@ func (d *Decoder) decodePositionClassB(bits []byte) bool {
 		v = &Vessel{MMSI: mmsi}
 		d.vessels[mmsi] = v
 	}
-	v.LastSeen = time.Now()
+	now := time.Now()
+	v.LastSeen = now
+	v.MsgCount++
+
 	if posValid {
-		v.Latitude = lat
-		v.Longitude = lon
-		v.PosValid = true
+		// SOG sanity checks (same rules as Class A)
+		sogOK := sogKnots < 0 || sogKnots <= 102.0
+		if sogOK && sogKnots >= 0 && v.ShipType >= 60 && v.ShipType <= 89 {
+			sogOK = sogKnots <= 50.0
+		}
+
+		posAccepted := true
+		if v.PosValid && !v.LastPosTime.IsZero() {
+			gap := now.Sub(v.LastPosTime)
+			if gap < 5*time.Minute {
+				dlat := lat - v.Latitude
+				dlon := lon - v.Longitude
+				dist := math.Sqrt(dlat*dlat + dlon*dlon)
+				if dist > 0.33 {
+					posAccepted = false
+				}
+			}
+		}
+
+		if posAccepted && sogOK {
+			v.Latitude = lat
+			v.Longitude = lon
+			v.PosValid = true
+			v.LastPosTime = now
+		}
+		if sogOK && sogKnots >= 0 {
+			v.Speed = sogKnots
+		}
 	}
-	if sog != 1023 {
-		v.Speed = float64(sog) / 10.0
-	}
+
 	if cog != 3600 {
 		v.Course = float64(cog) / 10.0
 	}
@@ -311,23 +383,34 @@ func (d *Decoder) decodePositionClassB(bits []byte) bool {
 }
 
 // decodePositionClassBExtended decodes message type 19.
+// Bit offsets per ITU-R M.1371-5 Table 47 (312 bits).
+// Position fields match Type 18; name at 143, ship type at 263.
 func (d *Decoder) decodePositionClassBExtended(bits []byte) bool {
 	if len(bits) < 312 {
 		return false
 	}
 
 	mmsi := uint32(bitsToUint(bits, 8, 30))
-	sog := bitsToUint(bits, 46, 10)
-	lonRaw := bitsToInt(bits, 57, 28)
-	latRaw := bitsToInt(bits, 85, 27)
-	cog := bitsToUint(bits, 112, 12)
-	heading := bitsToUint(bits, 124, 9)
-	name := bitsToString(bits, 143, 120)
+	// reserved: 38-45 (8 bits)
+	sog := bitsToUint(bits, 46, 10)      // 1/10 knot
+	// posAcc: bit 56
+	lonRaw := bitsToInt(bits, 57, 28)    // 1/10000 min
+	latRaw := bitsToInt(bits, 85, 27)    // 1/10000 min
+	cog := bitsToUint(bits, 112, 12)     // 1/10 degree
+	heading := bitsToUint(bits, 124, 9)  // degrees
+	// bits 133-142: timestamp (10 bits) per ITU spec
+	name := bitsToString(bits, 143, 120) // 20 chars at bit 143
 	shipType := uint8(bitsToUint(bits, 263, 8))
 
 	lat := float64(latRaw) / 600000.0
 	lon := float64(lonRaw) / 600000.0
-	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+		latRaw != 0x3412140 && lonRaw != 0x6791AC0
+
+	sogKnots := float64(sog) / 10.0
+	if sog == 1023 {
+		sogKnots = -1
+	}
 
 	d.mu.Lock()
 	v, exists := d.vessels[mmsi]
@@ -335,17 +418,42 @@ func (d *Decoder) decodePositionClassBExtended(bits []byte) bool {
 		v = &Vessel{MMSI: mmsi}
 		d.vessels[mmsi] = v
 	}
-	v.LastSeen = time.Now()
+	now := time.Now()
+	v.LastSeen = now
+	v.MsgCount++
 	v.Name = strings.TrimRight(name, "@ ")
 	v.ShipType = shipType
+
 	if posValid {
-		v.Latitude = lat
-		v.Longitude = lon
-		v.PosValid = true
+		sogOK := sogKnots < 0 || sogKnots <= 102.0
+		if sogOK && sogKnots >= 0 && v.ShipType >= 60 && v.ShipType <= 89 {
+			sogOK = sogKnots <= 50.0
+		}
+
+		posAccepted := true
+		if v.PosValid && !v.LastPosTime.IsZero() {
+			gap := now.Sub(v.LastPosTime)
+			if gap < 5*time.Minute {
+				dlat := lat - v.Latitude
+				dlon := lon - v.Longitude
+				dist := math.Sqrt(dlat*dlat + dlon*dlon)
+				if dist > 0.33 {
+					posAccepted = false
+				}
+			}
+		}
+
+		if posAccepted && sogOK {
+			v.Latitude = lat
+			v.Longitude = lon
+			v.PosValid = true
+			v.LastPosTime = now
+		}
+		if sogOK && sogKnots >= 0 {
+			v.Speed = sogKnots
+		}
 	}
-	if sog != 1023 {
-		v.Speed = float64(sog) / 10.0
-	}
+
 	if cog != 3600 {
 		v.Course = float64(cog) / 10.0
 	}
@@ -361,6 +469,9 @@ func (d *Decoder) decodePositionClassBExtended(bits []byte) bool {
 }
 
 // decodeStaticClassB decodes message type 24 (Part A and B).
+// Bit offsets per ITU-R M.1371-5 Table 49.
+// Part A (168 bits): name at 40 (120 bits = 20 chars).
+// Part B (168 bits): ship type at 40 (8 bits), vendor at 48 (42 bits), callsign at 90 (42 bits = 7 chars).
 func (d *Decoder) decodeStaticClassB(bits []byte) bool {
 	if len(bits) < 160 {
 		return false
@@ -376,15 +487,19 @@ func (d *Decoder) decodeStaticClassB(bits []byte) bool {
 		d.vessels[mmsi] = v
 	}
 	v.LastSeen = time.Now()
+	v.MsgCount++
 
 	switch partNum {
-	case 0: // Part A: name
-		name := bitsToString(bits, 40, 120)
-		v.Name = strings.TrimRight(name, "@ ")
-	case 1: // Part B: callsign, type, dimensions
+	case 0: // Part A: name at bit 40, 120 bits (20 chars)
+		if len(bits) >= 160 {
+			name := bitsToString(bits, 40, 120)
+			v.Name = strings.TrimRight(name, "@ ")
+		}
+	case 1: // Part B: ship type at 40 (8b), vendor at 48 (42b), callsign at 90 (42b)
 		if len(bits) >= 168 {
 			shipType := uint8(bitsToUint(bits, 40, 8))
-			callsign := bitsToString(bits, 90, 42)
+			// vendor ID: bits 48-89 (42 bits) — stored but not exposed in struct
+			callsign := bitsToString(bits, 90, 42) // 7 chars
 			v.ShipType = shipType
 			v.Callsign = strings.TrimRight(callsign, "@ ")
 		}
@@ -511,6 +626,36 @@ func (d *Decoder) GetActiveCount(maxAge time.Duration) int {
 		}
 	}
 	return count
+}
+
+// PruneStale removes vessels not seen within maxAge and returns the count removed.
+func (d *Decoder) PruneStale(maxAge time.Duration) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for mmsi, v := range d.vessels {
+		if !v.LastSeen.After(cutoff) {
+			delete(d.vessels, mmsi)
+			removed++
+		}
+	}
+	return removed
+}
+
+// GetActiveVessels returns copies of all vessels seen within maxAge that have a valid position.
+func (d *Decoder) GetActiveVessels(maxAge time.Duration) []*Vessel {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	cutoff := time.Now().Add(-maxAge)
+	result := make([]*Vessel, 0, len(d.vessels))
+	for _, v := range d.vessels {
+		if v.LastSeen.After(cutoff) && v.PosValid {
+			cp := *v
+			result = append(result, &cp)
+		}
+	}
+	return result
 }
 
 // Stats returns decoder statistics.
