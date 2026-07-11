@@ -93,31 +93,62 @@
     map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
     map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
 
-    // === AIRCRAFT ICON (SVG plane pointing UP) ===
-    const PLANE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-      <path d="M16 2 L14 12 L6 16 L7 18 L14 16 L14 26 L11 28 L11 30 L16 29 L21 30 L21 28 L18 26 L18 16 L25 18 L26 16 L18 12 Z" fill="COLOR"/>
-    </svg>`;
+    // === ICONS (canvas-rendered, synchronous) ===
+    const ICON_SIZE = 32;
 
-    const SHIP_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-      <path d="M12 3 L8 11 L4 13 L5 15 L12 13 L19 15 L20 13 L16 11 Z" fill="COLOR"/>
-    </svg>`;
-
-    function createIcon(svg, color, size) {
-      const img = new Image(size, size);
-      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg.replace('COLOR', color));
-      return img;
+    function makeArrowIcon(color) {
+      const size = ICON_SIZE;
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      // Aircraft arrow pointing UP
+      ctx.translate(size/2, size/2);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(0, -12);   // nose
+      ctx.lineTo(-5, 8);    // left wing
+      ctx.lineTo(-2, 5);
+      ctx.lineTo(-2, 12);   // left tail
+      ctx.lineTo(2, 12);    // right tail
+      ctx.lineTo(2, 5);
+      ctx.lineTo(5, 8);     // right wing
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+      return ctx.getImageData(0, 0, size, size);
     }
 
-    // Pre-create icon images for MapLibre
-    const ICON_SIZE = 24;
-    const icons = {};
+    function makeShipIcon(color) {
+      const size = ICON_SIZE;
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.translate(size/2, size/2);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(0, -10);   // bow
+      ctx.lineTo(-4, -2);
+      ctx.lineTo(-4, 8);    // stern left
+      ctx.lineTo(4, 8);     // stern right
+      ctx.lineTo(4, -2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+      return ctx.getImageData(0, 0, size, size);
+    }
+
     function loadIcons() {
-      const colors = { aircraft: '#4488ff', aircraft_high: '#6644ff', aircraft_low: '#44aaff', vessel: '#44cc88', vessel_fast: '#ffcc33' };
-      for (const [name, color] of Object.entries(colors)) {
-        const svg = name.startsWith('vessel') ? SHIP_SVG : PLANE_SVG;
-        const img = createIcon(svg, color, ICON_SIZE);
-        map.addImage(name, img, { sdf: false });
-      }
+      map.addImage('aircraft', makeArrowIcon('#4488ff'), { pixelRatio: 2 });
+      map.addImage('aircraft_high', makeArrowIcon('#8844ff'), { pixelRatio: 2 });
+      map.addImage('aircraft_low', makeArrowIcon('#44ccff'), { pixelRatio: 2 });
+      map.addImage('vessel', makeShipIcon('#44cc88'), { pixelRatio: 2 });
+      map.addImage('vessel_fast', makeShipIcon('#ffcc33'), { pixelRatio: 2 });
     }
 
     // === DATA ===
