@@ -174,14 +174,20 @@ func (p *Pipeline) broadcastTick(seq uint32) {
 func (p *Pipeline) collectStates(seq uint32) []generator.EntityState {
 	var states []generator.EntityState
 
+	const maxAge = 60 * time.Second
+
 	for _, entry := range p.adsbFeeds {
-		for _, ac := range entry.decoder.GetAircraft() {
+		// Prune stale aircraft
+		entry.decoder.PruneStale()
+		for _, ac := range entry.decoder.GetActiveAircraft(maxAge) {
 			states = append(states, ac.ToEntityState(seq))
 		}
 	}
 
 	for _, entry := range p.aisFeeds {
-		for _, v := range entry.decoder.GetVessels() {
+		// Prune stale vessels
+		entry.decoder.PruneStale(maxAge)
+		for _, v := range entry.decoder.GetActiveVessels(maxAge) {
 			states = append(states, v.ToEntityState(seq))
 		}
 	}
