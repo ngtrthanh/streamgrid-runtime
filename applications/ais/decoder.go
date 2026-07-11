@@ -148,12 +148,18 @@ func (d *Decoder) FeedLine(line string) bool {
 	switch msgType {
 	case 1, 2, 3:
 		return d.decodePositionClassA(bits)
+	case 4, 11:
+		return d.decodeBaseStation(bits)
 	case 5:
 		return d.decodeStaticVoyage(bits)
+	case 9:
+		return d.decodeSARPosition(bits)
 	case 18:
 		return d.decodePositionClassB(bits)
 	case 19:
 		return d.decodePositionClassBExtended(bits)
+	case 21:
+		return d.decodeAtoN(bits)
 	case 24:
 		return d.decodeStaticClassB(bits)
 	default:
@@ -503,6 +509,156 @@ func (d *Decoder) decodeStaticClassB(bits []byte) bool {
 			v.ShipType = shipType
 			v.Callsign = strings.TrimRight(callsign, "@ ")
 		}
+	}
+	d.mu.Unlock()
+
+	if d.onUpdate != nil {
+		d.onUpdate(v)
+	}
+	return true
+}
+
+// decodeBaseStation decodes message types 4 and 11 (Base Station Report / UTC Response).
+// Bit offsets per ITU-R M.1371-5 Table 10 (168 bits).
+// These are fixed infrastructure stations (MMSI 00MIDXXXX pattern) that transmit position.
+func (d *Decoder) decodeBaseStation(bits []byte) bool {
+	if len(bits) < 168 {
+		return false
+	}
+
+	mmsi := uint32(bitsToUint(bits, 8, 30))
+	// year:   bits 38-51 (14)
+	// month:  bits 52-55 (4)
+	// day:    bits 56-60 (5)
+	// hour:   bits 61-65 (5)
+	// minute: bits 66-71 (6)
+	// second: bits 72-77 (6)
+	// posAcc: bit 78
+	lonRaw := bitsToInt(bits, 79, 28)  // 1/10000 min
+	latRaw := bitsToInt(bits, 107, 27) // 1/10000 min
+
+	lat := float64(latRaw) / 600000.0
+	lon := float64(lonRaw) / 600000.0
+	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+		latRaw != 0x3412140 && lonRaw != 0x6791AC0
+
+	d.mu.Lock()
+	v, exists := d.vessels[mmsi]
+	if !exists {
+		v = &Vessel{MMSI: mmsi}
+		d.vessels[mmsi] = v
+	}
+	now := time.Now()
+	v.LastSeen = now
+	v.MsgCount++
+	// ShipType=0 marks this as a base station / fixed infrastructure
+	v.ShipType = 0
+
+	if posValid {
+		v.Latitude = lat
+		v.Longitude = lon
+		v.PosValid = true
+		v.LastPosTime = now
+	}
+	d.mu.Unlock()
+
+	if d.onUpdate != nil {
+		d.onUpdate(v)
+	}
+	return true
+}
+
+// decodeSARPosition decodes message type 9 (SAR Aircraft Position Report).
+// Bit offsets per ITU-R M.1371-5 Table 16 (168 bits).
+func (d *Decoder) decodeSARPosition(bits []byte) bool {
+	if len(bits) < 168 {
+		return false
+	}
+
+	mmsi := uint32(bitsToUint(bits, 8, 30))
+	altitude := bitsToUint(bits, 38, 12) // meters; 4095 = not available
+	sog := bitsToUint(bits, 50, 10)      // knots; 1023 = not available
+	// posAcc: bit 60
+	lonRaw := bitsToInt(bits, 61, 28)  // 1/10000 min
+	latRaw := bitsToInt(bits, 89, 27)  // 1/10000 min
+	cog := bitsToUint(bits, 116, 12)   // 1/10 degree
+
+	lat := float64(latRaw) / 600000.0
+	lon := float64(lonRaw) / 600000.0
+	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+		latRaw != 0x3412140 && lonRaw != 0x6791AC0
+
+	sogKnots := float64(sog) / 10.0
+	if sog == 1023 {
+		sogKnots = -1
+	}
+
+	d.mu.Lock()
+	v, exists := d.vessels[mmsi]
+	if !exists {
+		v = &Vessel{MMSI: mmsi}
+		d.vessels[mmsi] = v
+	}
+	now := time.Now()
+	v.LastSeen = now
+	v.MsgCount++
+
+	if posValid {
+		v.Latitude = lat
+		v.Longitude = lon
+		v.PosValid = true
+		v.LastPosTime = now
+	}
+	if sogKnots >= 0 {
+		v.Speed = sogKnots
+	}
+	if cog != 3600 {
+		v.Course = float64(cog) / 10.0
+	}
+	_ = altitude // available for future use
+	d.mu.Unlock()
+
+	if d.onUpdate != nil {
+		d.onUpdate(v)
+	}
+	return true
+}
+
+// decodeAtoN decodes message type 21 (Aid-to-Navigation Report).
+// Bit offsets per ITU-R M.1371-5 Table 60 (272+ bits).
+func (d *Decoder) decodeAtoN(bits []byte) bool {
+	if len(bits) < 272 {
+		return false
+	}
+
+	mmsi := uint32(bitsToUint(bits, 8, 30))
+	// atonType: bits 38-42 (5)
+	name := bitsToString(bits, 43, 120) // 20 chars, bits 43-162
+	// posAcc: bit 163
+	lonRaw := bitsToInt(bits, 164, 28) // 1/10000 min
+	latRaw := bitsToInt(bits, 192, 27) // 1/10000 min
+
+	lat := float64(latRaw) / 600000.0
+	lon := float64(lonRaw) / 600000.0
+	posValid := lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+		latRaw != 0x3412140 && lonRaw != 0x6791AC0
+
+	d.mu.Lock()
+	v, exists := d.vessels[mmsi]
+	if !exists {
+		v = &Vessel{MMSI: mmsi}
+		d.vessels[mmsi] = v
+	}
+	now := time.Now()
+	v.LastSeen = now
+	v.MsgCount++
+	v.Name = strings.TrimRight(name, "@ ")
+
+	if posValid {
+		v.Latitude = lat
+		v.Longitude = lon
+		v.PosValid = true
+		v.LastPosTime = now
 	}
 	d.mu.Unlock()
 
